@@ -32,6 +32,7 @@ interface PublicRaffleResponse {
     description: string;
     drawDate: string;
     prizeText: string;
+    prizeImage?: string;
     lotteryName: string;
     ticketPriceCop: number;
     paymentInstructions: string;
@@ -309,6 +310,16 @@ export function PublicRafflePage() {
             <p className="mt-2 text-slate-600 text-sm sm:text-base whitespace-pre-line">
               {raffle.description}
             </p>
+          )}
+
+          {raffle.prizeImage && (
+            <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+              <img
+                src={raffle.prizeImage}
+                alt={`Imagen del premio: ${raffle.prizeText}`}
+                className="w-full max-h-72 sm:max-h-80 object-contain mx-auto"
+              />
+            </div>
           )}
 
           <div className="mt-4 grid gap-3 sm:grid-cols-3">

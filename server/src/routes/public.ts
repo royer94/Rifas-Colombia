@@ -12,6 +12,7 @@ interface PublicRaffleRow {
   description: string;
   draw_date: string;
   prize_text: string;
+  prize_image: string;
   lottery_name: string;
   ticket_price_cop: number;
   payment_instructions: string;
@@ -51,6 +52,7 @@ publicRouter.get('/raffles', async (_req, res, next) => {
       description: string;
       draw_date: string;
       prize_text: string;
+      prize_image: string;
       lottery_name: string;
       ticket_price_cop: number;
       status: 'active' | 'closed';
@@ -58,7 +60,7 @@ publicRouter.get('/raffles', async (_req, res, next) => {
       pending_count: number | string;
       paid_count: number | string;
     }>(
-      `SELECT r.id, r.slug, r.name, r.description, r.draw_date, r.prize_text,
+      `SELECT r.id, r.slug, r.name, r.description, r.draw_date, r.prize_text, r.prize_image,
               r.lottery_name, r.ticket_price_cop, r.status, r.winning_number,
               SUM(CASE WHEN rn.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN rn.status = 'paid' THEN 1 ELSE 0 END) AS paid_count
@@ -80,6 +82,7 @@ publicRouter.get('/raffles', async (_req, res, next) => {
           description: r.description,
           drawDate: r.draw_date,
           prizeText: r.prize_text,
+          prizeImage: r.prize_image ?? '',
           lotteryName: r.lottery_name,
           ticketPriceCop: Number(r.ticket_price_cop),
           status: r.status,
@@ -107,7 +110,7 @@ publicRouter.get('/raffles/:slug', async (req, res, next) => {
 
     const db = getDb();
     const raffle = await db.queryOne<PublicRaffleRow>(
-      `SELECT id, slug, name, description, draw_date, prize_text, lottery_name,
+      `SELECT id, slug, name, description, draw_date, prize_text, prize_image, lottery_name,
               ticket_price_cop, payment_instructions, release_hours, status, winning_number
        FROM raffles
        WHERE slug = ? AND status != 'draft'`,
@@ -176,6 +179,7 @@ publicRouter.get('/raffles/:slug', async (req, res, next) => {
         description: raffle.description,
         drawDate: raffle.draw_date,
         prizeText: raffle.prize_text,
+        prizeImage: raffle.prize_image ?? '',
         lotteryName: raffle.lottery_name,
         ticketPriceCop: Number(raffle.ticket_price_cop),
         paymentInstructions: raffle.payment_instructions,

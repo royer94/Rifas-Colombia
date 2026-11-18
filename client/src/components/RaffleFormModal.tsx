@@ -1,7 +1,12 @@
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { ImagePlus, Trash2, X } from 'lucide-react';
 import { ApiError, apiFetch } from '../utils/api';
-import { COLOMBIAN_LOTTERIES, TICKET_PRICE_OPTIONS, formatCop } from '../utils/format';
+import {
+  COLOMBIAN_LOTTERIES,
+  TICKET_PRICE_OPTIONS,
+  compressPrizeImageFile,
+  formatCop,
+} from '../utils/format';
 
 export interface AdminRaffleFormInitial {
   id?: number;
@@ -10,6 +15,7 @@ export interface AdminRaffleFormInitial {
   description: string;
   drawDate: string;
   prizeText: string;
+  prizeImage?: string;
   lotteryName: string;
   ticketPriceCop: number;
   paymentInstructions: string;
@@ -40,6 +46,8 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
     initial?.drawDate ?? new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10)
   );
   const [prizeText, setPrizeText] = useState(initial?.prizeText ?? '');
+  const [prizeImage, setPrizeImage] = useState(initial?.prizeImage ?? '');
+  const [imageBusy, setImageBusy] = useState(false);
 
   const [lotteryChoice, setLotteryChoice] = useState(
     initialIsKnownLottery ? initial?.lotteryName ?? COLOMBIAN_LOTTERIES[0] : OTHER_LOTTERY_VALUE
@@ -109,6 +117,7 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
         description: description.trim(),
         drawDate,
         prizeText: prizeText.trim(),
+        prizeImage,
         lotteryName: finalLottery,
         ticketPriceCop: finalPrice,
         paymentInstructions: paymentInstructions.trim(),
@@ -193,6 +202,89 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
               <p className="mt-1 text-xs text-slate-500">
                 Escritura libre: puedes escribir un monto en COP o describir el premio físico.
               </p>
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="block text-sm font-bold text-slate-800 mb-1">
+                Imagen del premio <span className="text-slate-400 font-normal">(opcional)</span>
+              </label>
+
+              {prizeImage ? (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 flex flex-col sm:flex-row sm:items-center gap-3">
+                  <img
+                    src={prizeImage}
+                    alt="Vista previa del premio"
+                    className="w-full sm:w-32 h-32 object-contain rounded-xl bg-white border border-slate-200"
+                  />
+                  <div className="flex-1 space-y-2">
+                    <p className="text-xs font-semibold text-slate-600">
+                      Imagen lista para mostrarse en la página pública de la rifa.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 px-3 py-2 text-xs font-bold text-slate-700">
+                        <ImagePlus className="w-4 h-4" />
+                        <span>Cambiar imagen</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          className="sr-only"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            setImageBusy(true);
+                            setError('');
+                            try {
+                              setPrizeImage(await compressPrizeImageFile(file));
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : 'Error con la imagen.');
+                            } finally {
+                              setImageBusy(false);
+                            }
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setPrizeImage('')}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 px-3 py-2 text-xs font-bold text-rose-800"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        <span>Quitar imagen</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <label className="cursor-pointer flex items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-slate-300 hover:border-indigo-400 hover:bg-indigo-50/40 px-4 py-4 text-sm font-semibold text-slate-600 transition">
+                  <ImagePlus className="w-5 h-5 text-indigo-600 shrink-0" />
+                  <span>
+                    {imageBusy
+                      ? 'Optimizando imagen...'
+                      : 'Subir foto del premio (PNG, JPG o WebP)'}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    disabled={imageBusy}
+                    className="sr-only"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      setImageBusy(true);
+                      setError('');
+                      try {
+                        setPrizeImage(await compressPrizeImageFile(file));
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : 'Error con la imagen.');
+                      } finally {
+                        setImageBusy(false);
+                      }
+                    }}
+                  />
+                </label>
+              )}
             </div>
 
             <div className="sm:col-span-2">

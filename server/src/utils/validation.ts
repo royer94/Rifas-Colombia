@@ -73,3 +73,26 @@ export function csvEscape(value: string | number | null | undefined): string {
   const safe = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
   return `"${safe.replace(/"/g, '""')}"`;
 }
+
+const MAX_PRIZE_IMAGE_CHARS = 750_000;
+const DATA_URL_IMAGE_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+
+export function validatePrizeImage(value: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (value === undefined || value === null || value === '') {
+    return { ok: true, value: '' };
+  }
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'Formato de imagen inválido.' };
+  }
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return { ok: true, value: '' };
+  }
+  if (!DATA_URL_IMAGE_RE.test(trimmed)) {
+    return { ok: false, error: 'La imagen debe ser PNG, JPG, WebP o GIF válido.' };
+  }
+  if (trimmed.length > MAX_PRIZE_IMAGE_CHARS) {
+    return { ok: false, error: 'La imagen es demasiado pesada. Intenta con una imagen más liviana (máx. ~500 KB).' };
+  }
+  return { ok: true, value: trimmed };
+}

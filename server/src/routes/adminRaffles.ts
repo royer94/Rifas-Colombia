@@ -9,6 +9,7 @@ import {
   normalizePhone,
   normalizeText,
   slugify,
+  validatePrizeImage,
 } from '../utils/validation.js';
 
 export const adminRafflesRouter = Router();
@@ -23,6 +24,7 @@ interface RaffleDbRow {
   description: string;
   draw_date: string;
   prize_text: string;
+  prize_image: string;
   lottery_name: string;
   ticket_price_cop: number;
   payment_instructions: string;
@@ -31,6 +33,26 @@ interface RaffleDbRow {
   winning_number: string | null;
   created_at: string;
   updated_at: string;
+}
+
+function toAdminRaffleDto(r: RaffleDbRow) {
+  return {
+    id: Number(r.id),
+    slug: r.slug,
+    name: r.name,
+    description: r.description,
+    drawDate: r.draw_date,
+    prizeText: r.prize_text,
+    prizeImage: r.prize_image ?? '',
+    lotteryName: r.lottery_name,
+    ticketPriceCop: Number(r.ticket_price_cop),
+    paymentInstructions: r.payment_instructions,
+    releaseHours: Number(r.release_hours),
+    status: r.status,
+    winningNumber: r.winning_number,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 async function getOwnedRaffle(raffleId: number, adminId: number): Promise<RaffleDbRow | null> {
@@ -54,6 +76,7 @@ function parseRafflePayload(body: Record<string, unknown>) {
   const releaseHours = body?.releaseHours === undefined ? 24 : Number(body.releaseHours);
   const status = typeof body?.status === 'string' ? body.status : 'active';
   const rawSlug = typeof body?.slug === 'string' ? slugify(body.slug) : '';
+  const imageCheck = validatePrizeImage(body?.prizeImage);
 
   if (name.length < 3) {
     return { error: 'El nombre de la rifa debe tener al menos 3 caracteres.' };
@@ -63,6 +86,9 @@ function parseRafflePayload(body: Record<string, unknown>) {
   }
   if (prizeText.length < 2) {
     return { error: 'Escribe el premio de la rifa.' };
+  }
+  if (!imageCheck.ok) {
+    return { error: imageCheck.error };
   }
   if (lotteryName.length < 2) {
     return { error: 'Selecciona o escribe el nombre de la lotería.' };
@@ -86,6 +112,7 @@ function parseRafflePayload(body: Record<string, unknown>) {
       description,
       drawDate,
       prizeText,
+      prizeImage: imageCheck.value,
       lotteryName,
       ticketPriceCop,
       paymentInstructions,
@@ -140,20 +167,7 @@ adminRafflesRouter.get('/', async (req, res, next) => {
         const paid = Number(r.paid_count ?? 0);
         const ticketPriceCop = Number(r.ticket_price_cop);
         return {
-          id: Number(r.id),
-          slug: r.slug,
-          name: r.name,
-          description: r.description,
-          drawDate: r.draw_date,
-          prizeText: r.prize_text,
-          lotteryName: r.lottery_name,
-          ticketPriceCop,
-          paymentInstructions: r.payment_instructions,
-          releaseHours: Number(r.release_hours),
-          status: r.status,
-          winningNumber: r.winning_number,
-          createdAt: r.created_at,
-          updatedAt: r.updated_at,
+          ...toAdminRaffleDto(r),
           counts: {
             available: 100 - pending - paid,
             pending,
@@ -196,9 +210,9 @@ adminRafflesRouter.post('/', async (req, res, next) => {
     const now = new Date().toISOString();
     const insertedId = await db.insertReturningId(
       `INSERT INTO raffles (
-         admin_id, slug, name, description, draw_date, prize_text, lottery_name,
+         admin_id, slug, name, description, draw_date, prize_text, prize_image, lottery_name,
          ticket_price_cop, payment_instructions, release_hours, status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.admin!.id,
         slug,
@@ -206,6 +220,7 @@ adminRafflesRouter.post('/', async (req, res, next) => {
         data.description,
         data.drawDate,
         data.prizeText,
+        data.prizeImage,
         data.lotteryName,
         data.ticketPriceCop,
         data.paymentInstructions,
@@ -218,20 +233,7 @@ adminRafflesRouter.post('/', async (req, res, next) => {
 
     const created = (await getOwnedRaffle(insertedId, req.admin!.id))!;
     res.status(201).json({
-      raffle: {
-        id: Number(created.id),
-        slug: created.slug,
-        name: created.name,
-        description: created.description,
-        drawDate: created.draw_date,
-        prizeText: created.prize_text,
-        lotteryName: created.lottery_name,
-        ticketPriceCop: Number(created.ticket_price_cop),
-        paymentInstructions: created.payment_instructions,
-        releaseHours: Number(created.release_hours),
-        status: created.status,
-        winningNumber: created.winning_number,
-      },
+      raffle: toAdminRaffleDto(created),
     });
   } catch (err) {
     next(err);
@@ -274,7 +276,7 @@ adminRafflesRouter.put('/:id', async (req, res, next) => {
     await db.execute(
       `UPDATE raffles
        SET slug = ?, name = ?, description = ?, draw_date = ?, prize_text = ?,
-           lottery_name = ?, ticket_price_cop = ?, payment_instructions = ?,
+           prize_image = ?, lottery_name = ?, ticket_price_cop = ?, payment_instructions = ?,
            release_hours = ?, status = ?, updated_at = ?
        WHERE id = ? AND admin_id = ?`,
       [
@@ -283,6 +285,7 @@ adminRafflesRouter.put('/:id', async (req, res, next) => {
         data.description,
         data.drawDate,
         data.prizeText,
+        data.prizeImage,
         data.lotteryName,
         data.ticketPriceCop,
         data.paymentInstructions,
@@ -296,20 +299,7 @@ adminRafflesRouter.put('/:id', async (req, res, next) => {
 
     const updated = (await getOwnedRaffle(raffleId, req.admin!.id))!;
     res.json({
-      raffle: {
-        id: Number(updated.id),
-        slug: updated.slug,
-        name: updated.name,
-        description: updated.description,
-        drawDate: updated.draw_date,
-        prizeText: updated.prize_text,
-        lotteryName: updated.lottery_name,
-        ticketPriceCop: Number(updated.ticket_price_cop),
-        paymentInstructions: updated.payment_instructions,
-        releaseHours: Number(updated.release_hours),
-        status: updated.status,
-        winningNumber: updated.winning_number,
-      },
+      raffle: toAdminRaffleDto(updated),
     });
   } catch (err) {
     next(err);
@@ -473,22 +463,7 @@ adminRafflesRouter.get('/:id', async (req, res, next) => {
     );
 
     res.json({
-      raffle: {
-        id: Number(raffle.id),
-        slug: raffle.slug,
-        name: raffle.name,
-        description: raffle.description,
-        drawDate: raffle.draw_date,
-        prizeText: raffle.prize_text,
-        lotteryName: raffle.lottery_name,
-        ticketPriceCop,
-        paymentInstructions: raffle.payment_instructions,
-        releaseHours: Number(raffle.release_hours),
-        status: raffle.status,
-        winningNumber: raffle.winning_number,
-        createdAt: raffle.created_at,
-        updatedAt: raffle.updated_at,
-      },
+      raffle: toAdminRaffleDto(raffle),
       counts: {
         available: 100 - pendingCount - paidCount,
         pending: pendingCount,

@@ -1,0 +1,1 @@
+ALTER TABLE raffles ADD COLUMN prize_image TEXT NOT NULL DEFAULT '';

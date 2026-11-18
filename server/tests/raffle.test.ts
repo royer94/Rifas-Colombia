@@ -127,7 +127,27 @@ describe('Flujo completo de Rifas Colombia', () => {
     assert.ok((ok.headers.get('set-cookie') ?? '').toLowerCase().includes('httponly'));
   });
 
-  it('permite crear una rifa y aísla los datos entre administradores', async () => {
+  it('permite crear una rifa con imagen opcional y aísla los datos entre administradores', async () => {
+    const svgReject = await request('/api/admin/raffles', {
+      method: 'POST',
+      cookie: adminCookie,
+      body: JSON.stringify({
+        name: 'Rifa SVG Inválida',
+        drawDate: '2026-12-20',
+        prizeText: 'Premio',
+        prizeImage: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+        lotteryName: 'Lotería de Medellín',
+        ticketPriceCop: 20000,
+        paymentInstructions: 'Nequi 3001112233 a nombre de Juan',
+        releaseHours: 24,
+        status: 'active',
+      }),
+    });
+    assert.equal(svgReject.status, 400);
+
+    const samplePng =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
     const createRes = await request('/api/admin/raffles', {
       method: 'POST',
       cookie: adminCookie,
@@ -137,6 +157,7 @@ describe('Flujo completo de Rifas Colombia', () => {
         description: 'Rifa benéfica transparente',
         drawDate: '2026-12-20',
         prizeText: 'Moto NMAX 2026 o $10.000.000',
+        prizeImage: samplePng,
         lotteryName: 'Lotería de Medellín',
         ticketPriceCop: 20000,
         paymentInstructions: 'Nequi 3001112233 a nombre de Juan',
@@ -145,6 +166,7 @@ describe('Flujo completo de Rifas Colombia', () => {
       }),
     });
     assert.equal(createRes.status, 201);
+    assert.equal(createRes.json.raffle.prizeImage, samplePng);
     raffleId = createRes.json.raffle.id;
 
     const reg2 = await request('/api/admin/auth/register', {

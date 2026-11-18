@@ -11,6 +11,7 @@ interface PublicRaffleSummary {
   description: string;
   drawDate: string;
   prizeText: string;
+  prizeImage?: string;
   lotteryName: string;
   ticketPriceCop: number;
   status: 'active' | 'closed';
@@ -127,6 +128,15 @@ export function HomePage() {
                   className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-xs hover:border-indigo-400 hover:shadow-md transition flex flex-col justify-between"
                 >
                   <div>
+                    {raffle.prizeImage && (
+                      <div className="mb-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+                        <img
+                          src={raffle.prizeImage}
+                          alt={`Premio: ${raffle.prizeText}`}
+                          className="w-full h-40 object-contain mx-auto"
+                        />
+                      </div>
+                    )}
                     <div className="flex items-start justify-between gap-2">
                       <h4 className="text-lg font-extrabold text-slate-900 group-hover:text-indigo-700 transition">
                         {raffle.name}

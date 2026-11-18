@@ -279,6 +279,15 @@ export function AdminDashboardPage({
                   className="rounded-3xl bg-white border border-slate-200 p-5 shadow-xs flex flex-col justify-between gap-4"
                 >
                   <div>
+                    {raffle.prizeImage && (
+                      <div className="mb-3 overflow-hidden rounded-2xl border border-slate-200 bg-slate-100">
+                        <img
+                          src={raffle.prizeImage}
+                          alt={`Premio: ${raffle.prizeText}`}
+                          className="w-full h-36 object-contain mx-auto"
+                        />
+                      </div>
+                    )}
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <span className={`inline-block text-xs font-bold px-2.5 py-0.5 rounded-full ${statusBadge}`}>

@@ -113,3 +113,65 @@ export function buildPaymentReminderWhatsAppMessage(params: {
     `Cuando realices el pago, envíanos el comprobante por aquí para confirmarlo. ¡Gracias!`
   );
 }
+
+const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+const MAX_IMAGE_DATA_URL_LENGTH = 700_000;
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result);
+      else reject(new Error('No se pudo leer la imagen.'));
+    };
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo seleccionado.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('No se pudo procesar la imagen seleccionada.'));
+    img.src = src;
+  });
+}
+
+export async function compressPrizeImageFile(file: File): Promise<string> {
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    throw new Error('Formato no compatible. Usa una imagen PNG, JPG, WebP o GIF.');
+  }
+
+  const rawDataUrl = await readFileAsDataUrl(file);
+  if (file.type === 'image/gif' && rawDataUrl.length <= MAX_IMAGE_DATA_URL_LENGTH) {
+    return rawDataUrl;
+  }
+
+  const img = await loadImage(rawDataUrl);
+  const maxDim = 960;
+  const scale = Math.min(1, maxDim / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+  const width = Math.max(1, Math.round(img.naturalWidth * scale));
+  const height = Math.max(1, Math.round(img.naturalHeight * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Tu navegador no pudo procesar la imagen.');
+  }
+  ctx.drawImage(img, 0, 0, width, height);
+
+  let out = canvas.toDataURL('image/webp', 0.82);
+  if (!out.startsWith('data:image/webp') || out.length > MAX_IMAGE_DATA_URL_LENGTH) {
+    out = canvas.toDataURL('image/jpeg', 0.82);
+  }
+  if (out.length > MAX_IMAGE_DATA_URL_LENGTH) {
+    out = canvas.toDataURL('image/jpeg', 0.65);
+  }
+  if (out.length > MAX_IMAGE_DATA_URL_LENGTH) {
+    throw new Error('La imagen sigue siendo muy pesada. Prueba con otra imagen más pequeña.');
+  }
+  return out;
+}
