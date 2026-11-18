@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import bcrypt from 'bcryptjs';
-import { createConnection, setDbForTesting } from '../src/db/connection.js';
+import {
+  SqliteDbAdapter,
+  convertPlaceholders,
+  setDbForTesting,
+} from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { seedInitialAdmin } from '../src/db/seed.js';
-import { createApp } from '../src/index.js';
+import { createApp, resetDatabaseInitForTesting } from '../src/index.js';
 import { releaseExpiredNumbers } from '../src/services/expiration.js';
 
 let server: http.Server;
 let baseUrl = '';
-const db = createConnection(':memory:');
+const db = new SqliteDbAdapter(':memory:');
 
 async function request(
   path: string,
@@ -57,9 +61,10 @@ describe('Flujo completo de Rifas Colombia', () => {
   const raffleSlug = 'rifa-prueba-medellin';
 
   before(async () => {
+    resetDatabaseInitForTesting();
     setDbForTesting(db);
-    runMigrations(db);
-    seedInitialAdmin(db);
+    await runMigrations(db);
+    await seedInitialAdmin(db);
     const app = createApp();
     await new Promise<void>((resolve) => {
       server = app.listen(0, () => {
@@ -74,19 +79,31 @@ describe('Flujo completo de Rifas Colombia', () => {
 
   after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await db.close();
     setDbForTesting(null);
+    resetDatabaseInitForTesting();
+  });
+
+  it('convierte placeholders SQL correctamente para PostgreSQL (Supabase)', () => {
+    const converted = convertPlaceholders(
+      "SELECT * FROM raffles WHERE slug = ? AND status != '?' AND id = ?"
+    );
+    assert.equal(converted, "SELECT * FROM raffles WHERE slug = $1 AND status != '?' AND id = $2");
   });
 
   it('crea el usuario admin inicial con bcrypt y bloquea tras 5 intentos fallidos', async () => {
-    const row = db
-      .prepare('SELECT username, password_hash, must_change_password FROM admins WHERE username = ?')
-      .get('admin') as { username: string; password_hash: string; must_change_password: number };
+    const row = (await db.queryOne<{
+      username: string;
+      password_hash: string;
+      must_change_password: number;
+    }>('SELECT username, password_hash, must_change_password FROM admins WHERE username = ?', [
+      'admin',
+    ]))!;
 
     assert.equal(row.username, 'admin');
-    assert.equal(row.must_change_password, 1);
+    assert.equal(Number(row.must_change_password), 1);
     assert.ok(bcrypt.compareSync('Rifas2026!', row.password_hash));
 
-    // 5 intentos fallidos con otro usuario de prueba para verificar rate limiting
     for (let i = 0; i < 4; i++) {
       const fail = await request('/api/admin/auth/login', {
         method: 'POST',
@@ -100,7 +117,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     });
     assert.equal(fifth.status, 429);
 
-    // Login exitoso del admin seed
     const ok = await request('/api/admin/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username: 'admin', password: 'Rifas2026!' }),
@@ -131,7 +147,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     assert.equal(createRes.status, 201);
     raffleId = createRes.json.raffle.id;
 
-    // Registrar segundo admin y comprobar que no ve ni edita la rifa del primero
     const reg2 = await request('/api/admin/auth/register', {
       method: 'POST',
       body: JSON.stringify({
@@ -154,7 +169,6 @@ describe('Flujo completo de Rifas Colombia', () => {
   });
 
   it('garantiza reserva atómica anti-duplicados y no expone datos personales en la vista pública', async () => {
-    // Visitante 1 y Visitante 2 intentan apartar el número 27 simultáneamente
     const [res1, res2] = await Promise.all([
       request(`/api/public/raffles/${raffleSlug}/reserve`, {
         method: 'POST',
@@ -184,7 +198,6 @@ describe('Flujo completo de Rifas Colombia', () => {
 
     assert.ok(loserRes.json.error.includes('27'));
 
-    // Verificar atomicidad: el número adicional del perdedor NO quedó apartado
     const publicBoard = await request(`/api/public/raffles/${raffleSlug}`);
     assert.equal(publicBoard.status, 200);
     assert.equal(publicBoard.json.counts.pending, 2);
@@ -193,7 +206,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     const numObj = publicBoard.json.numbers.find((n: any) => n.number === expectedUnreserved);
     assert.equal(numObj.status, 'available');
 
-    // Privacidad: nunca se filtran nombres ni teléfonos en el endpoint público
     assert.equal(publicBoard.body.includes('Laura Martínez'), false);
     assert.equal(publicBoard.body.includes('3001234567'), false);
     assert.equal(publicBoard.body.includes('Carlos Gómez'), false);
@@ -207,7 +219,6 @@ describe('Flujo completo de Rifas Colombia', () => {
       .map((n: any) => n.number);
     assert.equal(takenNumbers.length, 2);
 
-    // Confirmar el primero
     const confirmRes = await request(
       `/api/admin/raffles/${raffleId}/numbers/${takenNumbers[0]}/confirm`,
       {
@@ -218,7 +229,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     );
     assert.equal(confirmRes.status, 200);
 
-    // Liberar el segundo
     const releaseRes = await request(
       `/api/admin/raffles/${raffleId}/numbers/${takenNumbers[1]}/release`,
       {
@@ -228,7 +238,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     );
     assert.equal(releaseRes.status, 200);
 
-    // Exportar CSV con BOM
     const csvRes = await request(`/api/admin/raffles/${raffleId}/export-csv`, {
       cookie: adminCookie,
     });
@@ -236,7 +245,6 @@ describe('Flujo completo de Rifas Colombia', () => {
     assert.deepEqual(Array.from(csvRes.rawBytes.subarray(0, 3)), [0xef, 0xbb, 0xbf]);
     assert.ok(csvRes.body.includes(takenNumbers[0]));
 
-    // Registrar ganador y verificar vista pública cerrada
     const winRes = await request(`/api/admin/raffles/${raffleId}/winner`, {
       method: 'POST',
       cookie: adminCookie,
@@ -249,30 +257,30 @@ describe('Flujo completo de Rifas Colombia', () => {
     assert.equal(closedPublic.json.raffle.status, 'closed');
     assert.equal(closedPublic.json.raffle.winningNumber, takenNumbers[0]);
     assert.ok(closedPublic.json.raffle.winnerName);
-    // El celular sigue sin exponerse públicamente
     assert.equal(closedPublic.body.includes('3001234567'), false);
     assert.equal(closedPublic.body.includes('3109876543'), false);
   });
 
-  it('libera automáticamente los números amarillos cuyo plazo ya venció', () => {
+  it('libera automáticamente los números amarillos cuyo plazo ya venció', async () => {
     const pastIso = new Date(Date.now() - 60_000).toISOString();
-    const buyerInfo = db
-      .prepare(
-        `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
-         VALUES (?, ?, ?, '', ?)`
-      )
-      .run(raffleId, 'Comprador Vencido', '3205556677', pastIso);
-    db.prepare(
+    const buyerId = await db.insertReturningId(
+      `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
+       VALUES (?, ?, ?, '', ?)`,
+      [raffleId, 'Comprador Vencido', '3205556677', pastIso]
+    );
+    await db.execute(
       `INSERT INTO raffle_numbers (raffle_id, number, buyer_id, status, payment_method, reserved_at, expires_at, paid_at)
-       VALUES (?, '77', ?, 'pending', '', ?, ?, NULL)`
-    ).run(raffleId, Number(buyerInfo.lastInsertRowid), pastIso, pastIso);
+       VALUES (?, '77', ?, 'pending', '', ?, ?, NULL)`,
+      [raffleId, buyerId, pastIso, pastIso]
+    );
 
-    const released = releaseExpiredNumbers(db, raffleId);
+    const released = await releaseExpiredNumbers(db, raffleId);
     assert.equal(released, 1);
 
-    const row = db
-      .prepare("SELECT number FROM raffle_numbers WHERE raffle_id = ? AND number = '77'")
-      .get(raffleId);
+    const row = await db.queryOne<{ number: string }>(
+      "SELECT number FROM raffle_numbers WHERE raffle_id = ? AND number = '77'",
+      [raffleId]
+    );
     assert.equal(row, undefined);
   });
 });

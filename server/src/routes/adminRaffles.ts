@@ -1,7 +1,7 @@
 import { Router } from 'express';
-import { getDb, withImmediateTransaction } from '../db/connection.js';
+import { getDb } from '../db/connection.js';
 import { requireAdmin } from '../middleware/auth.js';
-import { releaseExpiredNumbers } from '../services/expiration.js';
+import { releaseExpiredNumbers, releaseExpiredNumbersWithinTx } from '../services/expiration.js';
 import {
   csvEscape,
   isValidDateYmd,
@@ -33,11 +33,13 @@ interface RaffleDbRow {
   updated_at: string;
 }
 
-function getOwnedRaffle(raffleId: number, adminId: number): RaffleDbRow | null {
+async function getOwnedRaffle(raffleId: number, adminId: number): Promise<RaffleDbRow | null> {
+  if (!Number.isInteger(raffleId) || raffleId <= 0) return null;
   const db = getDb();
-  const row = db
-    .prepare('SELECT * FROM raffles WHERE id = ? AND admin_id = ?')
-    .get(raffleId, adminId) as RaffleDbRow | undefined;
+  const row = await db.queryOne<RaffleDbRow>(
+    'SELECT * FROM raffles WHERE id = ? AND admin_id = ?',
+    [raffleId, adminId]
+  );
   return row ?? null;
 }
 
@@ -94,7 +96,7 @@ function parseRafflePayload(body: Record<string, unknown>) {
   };
 }
 
-function generateUniqueSlug(baseName: string, excludeRaffleId?: number): string {
+async function generateUniqueSlug(baseName: string, excludeRaffleId?: number): Promise<string> {
   const db = getDb();
   const base = slugify(baseName) || 'rifa';
   let candidate = base;
@@ -102,20 +104,25 @@ function generateUniqueSlug(baseName: string, excludeRaffleId?: number): string 
 
   while (true) {
     const existing = excludeRaffleId
-      ? db.prepare('SELECT id FROM raffles WHERE slug = ? AND id != ?').get(candidate, excludeRaffleId)
-      : db.prepare('SELECT id FROM raffles WHERE slug = ?').get(candidate);
+      ? await db.queryOne<{ id: number }>('SELECT id FROM raffles WHERE slug = ? AND id != ?', [
+          candidate,
+          excludeRaffleId,
+        ])
+      : await db.queryOne<{ id: number }>('SELECT id FROM raffles WHERE slug = ?', [candidate]);
     if (!existing) return candidate;
     candidate = `${base}-${counter}`;
     counter += 1;
   }
 }
 
-adminRafflesRouter.get('/', (req, res) => {
-  const db = getDb();
-  releaseExpiredNumbers(db);
+adminRafflesRouter.get('/', async (req, res, next) => {
+  try {
+    const db = getDb();
+    await releaseExpiredNumbers(db);
 
-  const rows = db
-    .prepare(
+    const rows = await db.query<
+      RaffleDbRow & { pending_count: number | string; paid_count: number | string }
+    >(
       `SELECT r.*,
               SUM(CASE WHEN rn.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN rn.status = 'paid' THEN 1 ELSE 0 END) AS paid_count
@@ -123,604 +130,668 @@ adminRafflesRouter.get('/', (req, res) => {
        LEFT JOIN raffle_numbers rn ON rn.raffle_id = r.id
        WHERE r.admin_id = ?
        GROUP BY r.id
-       ORDER BY r.created_at DESC, r.id DESC`
-    )
-    .all(req.admin!.id) as unknown as Array<
-    RaffleDbRow & { pending_count: number; paid_count: number }
-  >;
+       ORDER BY r.created_at DESC, r.id DESC`,
+      [req.admin!.id]
+    );
 
-  res.json({
-    raffles: rows.map((r) => {
-      const pending = Number(r.pending_count ?? 0);
-      const paid = Number(r.paid_count ?? 0);
-      return {
-        id: r.id,
-        slug: r.slug,
-        name: r.name,
-        description: r.description,
-        drawDate: r.draw_date,
-        prizeText: r.prize_text,
-        lotteryName: r.lottery_name,
-        ticketPriceCop: r.ticket_price_cop,
-        paymentInstructions: r.payment_instructions,
-        releaseHours: r.release_hours,
-        status: r.status,
-        winningNumber: r.winning_number,
-        createdAt: r.created_at,
-        updatedAt: r.updated_at,
-        counts: {
-          available: 100 - pending - paid,
-          pending,
-          paid,
-        },
-        totalCollectedCop: paid * r.ticket_price_cop,
-        pendingAmountCop: pending * r.ticket_price_cop,
-      };
-    }),
-  });
+    res.json({
+      raffles: rows.map((r) => {
+        const pending = Number(r.pending_count ?? 0);
+        const paid = Number(r.paid_count ?? 0);
+        const ticketPriceCop = Number(r.ticket_price_cop);
+        return {
+          id: Number(r.id),
+          slug: r.slug,
+          name: r.name,
+          description: r.description,
+          drawDate: r.draw_date,
+          prizeText: r.prize_text,
+          lotteryName: r.lottery_name,
+          ticketPriceCop,
+          paymentInstructions: r.payment_instructions,
+          releaseHours: Number(r.release_hours),
+          status: r.status,
+          winningNumber: r.winning_number,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          counts: {
+            available: 100 - pending - paid,
+            pending,
+            paid,
+          },
+          totalCollectedCop: paid * ticketPriceCop,
+          pendingAmountCop: pending * ticketPriceCop,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.post('/', (req, res) => {
-  const parsed = parseRafflePayload(req.body ?? {});
-  if ('error' in parsed) {
-    res.status(400).json({ error: parsed.error });
-    return;
-  }
-
-  const db = getDb();
-  const data = parsed.data;
-  let slug = data.customSlug;
-
-  if (slug) {
-    const exists = db.prepare('SELECT id FROM raffles WHERE slug = ?').get(slug);
-    if (exists) {
-      res.status(409).json({ error: `El enlace "/r/${slug}" ya está ocupado por otra rifa.` });
+adminRafflesRouter.post('/', async (req, res, next) => {
+  try {
+    const parsed = parseRafflePayload(req.body ?? {});
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error });
       return;
     }
-  } else {
-    slug = generateUniqueSlug(data.name);
-  }
 
-  const now = new Date().toISOString();
-  const info = db
-    .prepare(
+    const db = getDb();
+    const data = parsed.data;
+    let slug = data.customSlug;
+
+    if (slug) {
+      const exists = await db.queryOne<{ id: number }>('SELECT id FROM raffles WHERE slug = ?', [
+        slug,
+      ]);
+      if (exists) {
+        res.status(409).json({ error: `El enlace "/r/${slug}" ya está ocupado por otra rifa.` });
+        return;
+      }
+    } else {
+      slug = await generateUniqueSlug(data.name);
+    }
+
+    const now = new Date().toISOString();
+    const insertedId = await db.insertReturningId(
       `INSERT INTO raffles (
          admin_id, slug, name, description, draw_date, prize_text, lottery_name,
          ticket_price_cop, payment_instructions, release_hours, status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      req.admin!.id,
-      slug,
-      data.name,
-      data.description,
-      data.drawDate,
-      data.prizeText,
-      data.lotteryName,
-      data.ticketPriceCop,
-      data.paymentInstructions,
-      data.releaseHours,
-      data.status,
-      now,
-      now
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.admin!.id,
+        slug,
+        data.name,
+        data.description,
+        data.drawDate,
+        data.prizeText,
+        data.lotteryName,
+        data.ticketPriceCop,
+        data.paymentInstructions,
+        data.releaseHours,
+        data.status,
+        now,
+        now,
+      ]
     );
 
-  const created = getOwnedRaffle(Number(info.lastInsertRowid), req.admin!.id)!;
-  res.status(201).json({
-    raffle: {
-      id: created.id,
-      slug: created.slug,
-      name: created.name,
-      description: created.description,
-      drawDate: created.draw_date,
-      prizeText: created.prize_text,
-      lotteryName: created.lottery_name,
-      ticketPriceCop: created.ticket_price_cop,
-      paymentInstructions: created.payment_instructions,
-      releaseHours: created.release_hours,
-      status: created.status,
-      winningNumber: created.winning_number,
-    },
-  });
+    const created = (await getOwnedRaffle(insertedId, req.admin!.id))!;
+    res.status(201).json({
+      raffle: {
+        id: Number(created.id),
+        slug: created.slug,
+        name: created.name,
+        description: created.description,
+        drawDate: created.draw_date,
+        prizeText: created.prize_text,
+        lotteryName: created.lottery_name,
+        ticketPriceCop: Number(created.ticket_price_cop),
+        paymentInstructions: created.payment_instructions,
+        releaseHours: Number(created.release_hours),
+        status: created.status,
+        winningNumber: created.winning_number,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.put('/:id', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const existing = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!existing) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
-
-  const parsed = parseRafflePayload(req.body ?? {});
-  if ('error' in parsed) {
-    res.status(400).json({ error: parsed.error });
-    return;
-  }
-
-  const db = getDb();
-  const data = parsed.data;
-  const nextSlug = data.customSlug || existing.slug;
-
-  if (nextSlug !== existing.slug) {
-    const slugConflict = db
-      .prepare('SELECT id FROM raffles WHERE slug = ? AND id != ?')
-      .get(nextSlug, raffleId);
-    if (slugConflict) {
-      res.status(409).json({ error: `El enlace "/r/${nextSlug}" ya está ocupado por otra rifa.` });
+adminRafflesRouter.put('/:id', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const existing = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
       return;
     }
+
+    const parsed = parseRafflePayload(req.body ?? {});
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+
+    const db = getDb();
+    const data = parsed.data;
+    const nextSlug = data.customSlug || existing.slug;
+
+    if (nextSlug !== existing.slug) {
+      const slugConflict = await db.queryOne<{ id: number }>(
+        'SELECT id FROM raffles WHERE slug = ? AND id != ?',
+        [nextSlug, raffleId]
+      );
+      if (slugConflict) {
+        res
+          .status(409)
+          .json({ error: `El enlace "/r/${nextSlug}" ya está ocupado por otra rifa.` });
+        return;
+      }
+    }
+
+    const now = new Date().toISOString();
+    await db.execute(
+      `UPDATE raffles
+       SET slug = ?, name = ?, description = ?, draw_date = ?, prize_text = ?,
+           lottery_name = ?, ticket_price_cop = ?, payment_instructions = ?,
+           release_hours = ?, status = ?, updated_at = ?
+       WHERE id = ? AND admin_id = ?`,
+      [
+        nextSlug,
+        data.name,
+        data.description,
+        data.drawDate,
+        data.prizeText,
+        data.lotteryName,
+        data.ticketPriceCop,
+        data.paymentInstructions,
+        data.releaseHours,
+        data.status,
+        now,
+        raffleId,
+        req.admin!.id,
+      ]
+    );
+
+    const updated = (await getOwnedRaffle(raffleId, req.admin!.id))!;
+    res.json({
+      raffle: {
+        id: Number(updated.id),
+        slug: updated.slug,
+        name: updated.name,
+        description: updated.description,
+        drawDate: updated.draw_date,
+        prizeText: updated.prize_text,
+        lotteryName: updated.lottery_name,
+        ticketPriceCop: Number(updated.ticket_price_cop),
+        paymentInstructions: updated.payment_instructions,
+        releaseHours: Number(updated.release_hours),
+        status: updated.status,
+        winningNumber: updated.winning_number,
+      },
+    });
+  } catch (err) {
+    next(err);
   }
-
-  const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE raffles
-     SET slug = ?, name = ?, description = ?, draw_date = ?, prize_text = ?,
-         lottery_name = ?, ticket_price_cop = ?, payment_instructions = ?,
-         release_hours = ?, status = ?, updated_at = ?
-     WHERE id = ? AND admin_id = ?`
-  ).run(
-    nextSlug,
-    data.name,
-    data.description,
-    data.drawDate,
-    data.prizeText,
-    data.lotteryName,
-    data.ticketPriceCop,
-    data.paymentInstructions,
-    data.releaseHours,
-    data.status,
-    now,
-    raffleId,
-    req.admin!.id
-  );
-
-  const updated = getOwnedRaffle(raffleId, req.admin!.id)!;
-  res.json({
-    raffle: {
-      id: updated.id,
-      slug: updated.slug,
-      name: updated.name,
-      description: updated.description,
-      drawDate: updated.draw_date,
-      prizeText: updated.prize_text,
-      lotteryName: updated.lottery_name,
-      ticketPriceCop: updated.ticket_price_cop,
-      paymentInstructions: updated.payment_instructions,
-      releaseHours: updated.release_hours,
-      status: updated.status,
-      winningNumber: updated.winning_number,
-    },
-  });
 });
 
-adminRafflesRouter.delete('/:id', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const existing = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!existing) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+adminRafflesRouter.delete('/:id', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const existing = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!existing) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const db = getDb();
-  db.prepare('DELETE FROM raffles WHERE id = ? AND admin_id = ?').run(raffleId, req.admin!.id);
-  res.json({ ok: true });
+    const db = getDb();
+    await db.execute('DELETE FROM raffles WHERE id = ? AND admin_id = ?', [
+      raffleId,
+      req.admin!.id,
+    ]);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.get('/:id', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+adminRafflesRouter.get('/:id', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const db = getDb();
-  releaseExpiredNumbers(db, raffleId);
+    const db = getDb();
+    await releaseExpiredNumbers(db, raffleId);
 
-  const rows = db
-    .prepare(
+    const rows = await db.query<{
+      number: string;
+      status: 'pending' | 'paid';
+      payment_method: string;
+      reserved_at: string;
+      expires_at: string | null;
+      paid_at: string | null;
+      buyer_id: number;
+      full_name: string;
+      phone: string;
+      address: string;
+      buyer_created_at: string;
+    }>(
       `SELECT rn.number, rn.status, rn.payment_method, rn.reserved_at, rn.expires_at, rn.paid_at,
               b.id AS buyer_id, b.full_name, b.phone, b.address, b.created_at AS buyer_created_at
        FROM raffle_numbers rn
        JOIN buyers b ON b.id = rn.buyer_id
        WHERE rn.raffle_id = ?
-       ORDER BY rn.number ASC`
-    )
-    .all(raffleId) as Array<{
-    number: string;
-    status: 'pending' | 'paid';
-    payment_method: string;
-    reserved_at: string;
-    expires_at: string | null;
-    paid_at: string | null;
-    buyer_id: number;
-    full_name: string;
-    phone: string;
-    address: string;
-    buyer_created_at: string;
-  }>;
+       ORDER BY rn.number ASC`,
+      [raffleId]
+    );
 
-  const byNumber = new Map<string, (typeof rows)[number]>();
-  const buyersMap = new Map<
-    number,
-    {
-      buyerId: number;
-      fullName: string;
-      phone: string;
-      address: string;
-      numbers: string[];
-      pendingNumbers: string[];
-      paidNumbers: string[];
-      totalCop: number;
-      status: 'pending' | 'paid' | 'mixed';
-      paymentMethods: string[];
-      createdAt: string;
-      earliestExpiresAt: string | null;
-    }
-  >();
-
-  let pendingCount = 0;
-  let paidCount = 0;
-
-  for (const row of rows) {
-    byNumber.set(row.number, row);
-    if (row.status === 'pending') pendingCount += 1;
-    else paidCount += 1;
-
-    let entry = buyersMap.get(row.buyer_id);
-    if (!entry) {
-      entry = {
-        buyerId: row.buyer_id,
-        fullName: row.full_name,
-        phone: row.phone,
-        address: row.address,
-        numbers: [],
-        pendingNumbers: [],
-        paidNumbers: [],
-        totalCop: 0,
-        status: 'pending',
-        paymentMethods: [],
-        createdAt: row.buyer_created_at,
-        earliestExpiresAt: null,
-      };
-      buyersMap.set(row.buyer_id, entry);
-    }
-
-    entry.numbers.push(row.number);
-    entry.totalCop += raffle.ticket_price_cop;
-    if (row.status === 'pending') {
-      entry.pendingNumbers.push(row.number);
-      if (row.expires_at && (!entry.earliestExpiresAt || row.expires_at < entry.earliestExpiresAt)) {
-        entry.earliestExpiresAt = row.expires_at;
+    const ticketPriceCop = Number(raffle.ticket_price_cop);
+    const byNumber = new Map<string, (typeof rows)[number]>();
+    const buyersMap = new Map<
+      number,
+      {
+        buyerId: number;
+        fullName: string;
+        phone: string;
+        address: string;
+        numbers: string[];
+        pendingNumbers: string[];
+        paidNumbers: string[];
+        totalCop: number;
+        status: 'pending' | 'paid' | 'mixed';
+        paymentMethods: string[];
+        createdAt: string;
+        earliestExpiresAt: string | null;
       }
-    } else {
-      entry.paidNumbers.push(row.number);
-    }
-    if (row.payment_method && !entry.paymentMethods.includes(row.payment_method)) {
-      entry.paymentMethods.push(row.payment_method);
-    }
-  }
+    >();
 
-  for (const entry of buyersMap.values()) {
-    if (entry.pendingNumbers.length === 0) entry.status = 'paid';
-    else if (entry.paidNumbers.length === 0) entry.status = 'pending';
-    else entry.status = 'mixed';
-  }
+    let pendingCount = 0;
+    let paidCount = 0;
 
-  const numbers = Array.from({ length: 100 }, (_, i) => {
-    const num = String(i).padStart(2, '0');
-    const hit = byNumber.get(num);
-    if (!hit) {
+    for (const row of rows) {
+      const buyerId = Number(row.buyer_id);
+      byNumber.set(row.number, row);
+      if (row.status === 'pending') pendingCount += 1;
+      else paidCount += 1;
+
+      let entry = buyersMap.get(buyerId);
+      if (!entry) {
+        entry = {
+          buyerId,
+          fullName: row.full_name,
+          phone: row.phone,
+          address: row.address,
+          numbers: [],
+          pendingNumbers: [],
+          paidNumbers: [],
+          totalCop: 0,
+          status: 'pending',
+          paymentMethods: [],
+          createdAt: row.buyer_created_at,
+          earliestExpiresAt: null,
+        };
+        buyersMap.set(buyerId, entry);
+      }
+
+      entry.numbers.push(row.number);
+      entry.totalCop += ticketPriceCop;
+      if (row.status === 'pending') {
+        entry.pendingNumbers.push(row.number);
+        if (
+          row.expires_at &&
+          (!entry.earliestExpiresAt || row.expires_at < entry.earliestExpiresAt)
+        ) {
+          entry.earliestExpiresAt = row.expires_at;
+        }
+      } else {
+        entry.paidNumbers.push(row.number);
+      }
+      if (row.payment_method && !entry.paymentMethods.includes(row.payment_method)) {
+        entry.paymentMethods.push(row.payment_method);
+      }
+    }
+
+    for (const entry of buyersMap.values()) {
+      if (entry.pendingNumbers.length === 0) entry.status = 'paid';
+      else if (entry.paidNumbers.length === 0) entry.status = 'pending';
+      else entry.status = 'mixed';
+    }
+
+    const numbers = Array.from({ length: 100 }, (_, i) => {
+      const num = String(i).padStart(2, '0');
+      const hit = byNumber.get(num);
+      if (!hit) {
+        return {
+          number: num,
+          status: 'available' as const,
+          buyer: null,
+        };
+      }
       return {
         number: num,
-        status: 'available' as const,
-        buyer: null,
+        status: hit.status,
+        paymentMethod: hit.payment_method,
+        reservedAt: hit.reserved_at,
+        expiresAt: hit.expires_at,
+        paidAt: hit.paid_at,
+        buyer: {
+          buyerId: Number(hit.buyer_id),
+          fullName: hit.full_name,
+          phone: hit.phone,
+          address: hit.address,
+        },
       };
-    }
-    return {
-      number: num,
-      status: hit.status,
-      paymentMethod: hit.payment_method,
-      reservedAt: hit.reserved_at,
-      expiresAt: hit.expires_at,
-      paidAt: hit.paid_at,
-      buyer: {
-        buyerId: hit.buyer_id,
-        fullName: hit.full_name,
-        phone: hit.phone,
-        address: hit.address,
+    });
+
+    const participants = Array.from(buyersMap.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    );
+
+    res.json({
+      raffle: {
+        id: Number(raffle.id),
+        slug: raffle.slug,
+        name: raffle.name,
+        description: raffle.description,
+        drawDate: raffle.draw_date,
+        prizeText: raffle.prize_text,
+        lotteryName: raffle.lottery_name,
+        ticketPriceCop,
+        paymentInstructions: raffle.payment_instructions,
+        releaseHours: Number(raffle.release_hours),
+        status: raffle.status,
+        winningNumber: raffle.winning_number,
+        createdAt: raffle.created_at,
+        updatedAt: raffle.updated_at,
       },
-    };
-  });
-
-  const participants = Array.from(buyersMap.values()).sort((a, b) =>
-    b.createdAt.localeCompare(a.createdAt)
-  );
-
-  res.json({
-    raffle: {
-      id: raffle.id,
-      slug: raffle.slug,
-      name: raffle.name,
-      description: raffle.description,
-      drawDate: raffle.draw_date,
-      prizeText: raffle.prize_text,
-      lotteryName: raffle.lottery_name,
-      ticketPriceCop: raffle.ticket_price_cop,
-      paymentInstructions: raffle.payment_instructions,
-      releaseHours: raffle.release_hours,
-      status: raffle.status,
-      winningNumber: raffle.winning_number,
-      createdAt: raffle.created_at,
-      updatedAt: raffle.updated_at,
-    },
-    counts: {
-      available: 100 - pendingCount - paidCount,
-      pending: pendingCount,
-      paid: paidCount,
-      totalCollectedCop: paidCount * raffle.ticket_price_cop,
-      pendingAmountCop: pendingCount * raffle.ticket_price_cop,
-    },
-    numbers,
-    participants,
-  });
+      counts: {
+        available: 100 - pendingCount - paidCount,
+        pending: pendingCount,
+        paid: paidCount,
+        totalCollectedCop: paidCount * ticketPriceCop,
+        pendingAmountCop: pendingCount * ticketPriceCop,
+      },
+      numbers,
+      participants,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.post('/:id/numbers/:number/confirm', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const number = req.params.number;
-  if (!isValidTwoDigitNumber(number)) {
-    res.status(400).json({ error: 'Número inválido.' });
-    return;
-  }
+adminRafflesRouter.post('/:id/numbers/:number/confirm', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const number = req.params.number;
+    if (!isValidTwoDigitNumber(number)) {
+      res.status(400).json({ error: 'Número inválido.' });
+      return;
+    }
 
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
-  const db = getDb();
-  releaseExpiredNumbers(db, raffleId);
+    const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
+    const db = getDb();
+    await releaseExpiredNumbers(db, raffleId);
 
-  const row = db
-    .prepare(
+    const row = await db.queryOne<{
+      status: 'pending' | 'paid';
+      buyer_id: number;
+      full_name: string;
+      phone: string;
+    }>(
       `SELECT rn.status, b.id AS buyer_id, b.full_name, b.phone
        FROM raffle_numbers rn
        JOIN buyers b ON b.id = rn.buyer_id
-       WHERE rn.raffle_id = ? AND rn.number = ?`
-    )
-    .get(raffleId, number) as
-    | { status: 'pending' | 'paid'; buyer_id: number; full_name: string; phone: string }
-    | undefined;
+       WHERE rn.raffle_id = ? AND rn.number = ?`,
+      [raffleId, number]
+    );
 
-  if (!row) {
-    res.status(404).json({ error: `El número ${number} está disponible (no tiene comprador apartado).` });
-    return;
+    if (!row) {
+      res
+        .status(404)
+        .json({ error: `El número ${number} está disponible (no tiene comprador apartado).` });
+      return;
+    }
+
+    const paidAt = new Date().toISOString();
+    await db.execute(
+      `UPDATE raffle_numbers
+       SET status = 'paid',
+           expires_at = NULL,
+           paid_at = ?,
+           payment_method = COALESCE(NULLIF(?, ''), payment_method)
+       WHERE raffle_id = ? AND number = ?`,
+      [paidAt, paymentMethod, raffleId, number]
+    );
+
+    res.json({
+      ok: true,
+      confirmed: {
+        number,
+        buyerName: row.full_name,
+        buyerPhone: row.phone,
+      },
+    });
+  } catch (err) {
+    next(err);
   }
-
-  const paidAt = new Date().toISOString();
-  db.prepare(
-    `UPDATE raffle_numbers
-     SET status = 'paid', expires_at = NULL, paid_at = ?, payment_method = CASE WHEN ? != '' THEN ? ELSE payment_method END
-     WHERE raffle_id = ? AND number = ?`
-  ).run(paidAt, paymentMethod, paymentMethod, raffleId, number);
-
-  res.json({
-    ok: true,
-    confirmed: {
-      number,
-      buyerName: row.full_name,
-      buyerPhone: row.phone,
-    },
-  });
 });
 
-adminRafflesRouter.post('/:id/numbers/:number/release', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const number = req.params.number;
-  if (!isValidTwoDigitNumber(number)) {
-    res.status(400).json({ error: 'Número inválido.' });
-    return;
-  }
+adminRafflesRouter.post('/:id/numbers/:number/release', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const number = req.params.number;
+    if (!isValidTwoDigitNumber(number)) {
+      res.status(400).json({ error: 'Número inválido.' });
+      return;
+    }
 
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const db = getDb();
-  withImmediateTransaction(db, () => {
-    db.prepare('DELETE FROM raffle_numbers WHERE raffle_id = ? AND number = ?').run(raffleId, number);
-    db.prepare(
-      `DELETE FROM buyers
-       WHERE raffle_id = ?
-         AND NOT EXISTS (SELECT 1 FROM raffle_numbers rn WHERE rn.buyer_id = buyers.id)`
-    ).run(raffleId);
-  });
-
-  res.json({ ok: true });
-});
-
-adminRafflesRouter.post('/:id/numbers/:number/reassign', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const number = req.params.number;
-  if (!isValidTwoDigitNumber(number)) {
-    res.status(400).json({ error: 'Número inválido.' });
-    return;
-  }
-
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
-
-  const fullName = normalizeText(req.body?.fullName, 100);
-  const phone = normalizePhone(req.body?.phone);
-  const address = normalizeText(req.body?.address, 200);
-  const markPaid = Boolean(req.body?.markPaid);
-  const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
-
-  if (fullName.length < 3) {
-    res.status(400).json({ error: 'Ingresa el nombre completo del nuevo comprador.' });
-    return;
-  }
-  if (!phone) {
-    res.status(400).json({ error: 'Ingresa un celular colombiano válido de 10 dígitos (ej: 3001234567).' });
-    return;
-  }
-
-  const db = getDb();
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const expiresAtIso = markPaid
-    ? null
-    : new Date(now.getTime() + raffle.release_hours * 60 * 60 * 1000).toISOString();
-
-  withImmediateTransaction(db, () => {
-    const existingNum = db
-      .prepare('SELECT id FROM raffle_numbers WHERE raffle_id = ? AND number = ?')
-      .get(raffleId, number);
-
-    const buyerInsert = db
-      .prepare(
-        `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(raffleId, fullName, phone, address, nowIso);
-    const buyerId = Number(buyerInsert.lastInsertRowid);
-
-    if (existingNum) {
-      db.prepare(
-        `UPDATE raffle_numbers
-         SET buyer_id = ?, status = ?, payment_method = ?, reserved_at = ?, expires_at = ?, paid_at = ?
-         WHERE raffle_id = ? AND number = ?`
-      ).run(
-        buyerId,
-        markPaid ? 'paid' : 'pending',
-        paymentMethod,
-        nowIso,
-        expiresAtIso,
-        markPaid ? nowIso : null,
-        raffleId,
-        number
-      );
-
-      db.prepare(
-        `DELETE FROM buyers
-         WHERE raffle_id = ?
-           AND NOT EXISTS (SELECT 1 FROM raffle_numbers rn WHERE rn.buyer_id = buyers.id)`
-      ).run(raffleId);
-    } else {
-      db.prepare(
-        `INSERT INTO raffle_numbers (raffle_id, number, buyer_id, status, payment_method, reserved_at, expires_at, paid_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
+    const db = getDb();
+    await db.withTransaction(async (tx) => {
+      await tx.execute('DELETE FROM raffle_numbers WHERE raffle_id = ? AND number = ?', [
         raffleId,
         number,
-        buyerId,
-        markPaid ? 'paid' : 'pending',
-        paymentMethod,
-        nowIso,
-        expiresAtIso,
-        markPaid ? nowIso : null
+      ]);
+      await tx.execute(
+        `DELETE FROM buyers
+         WHERE raffle_id = ?
+           AND NOT EXISTS (SELECT 1 FROM raffle_numbers rn WHERE rn.buyer_id = buyers.id)`,
+        [raffleId]
       );
-    }
-  });
+    });
 
-  res.json({
-    ok: true,
-    assigned: {
-      number,
-      fullName,
-      phone,
-      status: markPaid ? 'paid' : 'pending',
-    },
-  });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.post('/:id/numbers/assign', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
-
-  const rawNumbers: unknown[] = Array.isArray(req.body?.numbers) ? req.body.numbers : [];
-  const numbers: string[] = Array.from(
-    new Set(rawNumbers.filter(isValidTwoDigitNumber))
-  ).sort();
-  const fullName = normalizeText(req.body?.fullName, 100);
-  const phone = normalizePhone(req.body?.phone);
-  const address = normalizeText(req.body?.address, 200);
-  const markPaid = req.body?.markPaid !== false; // por defecto venta directa pagada
-  const paymentMethod = normalizeText(req.body?.paymentMethod, 50) || (markPaid ? 'Efectivo' : '');
-
-  if (numbers.length === 0) {
-    res.status(400).json({ error: 'Selecciona al menos un número válido entre 00 y 99.' });
-    return;
-  }
-  if (fullName.length < 3) {
-    res.status(400).json({ error: 'Ingresa el nombre completo del comprador.' });
-    return;
-  }
-  if (!phone) {
-    res.status(400).json({ error: 'Ingresa un celular colombiano válido de 10 dígitos (ej: 3001234567).' });
-    return;
-  }
-
-  const db = getDb();
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const expiresAtIso = markPaid
-    ? null
-    : new Date(now.getTime() + raffle.release_hours * 60 * 60 * 1000).toISOString();
-
+adminRafflesRouter.post('/:id/numbers/:number/reassign', async (req, res, next) => {
   try {
-    withImmediateTransaction(db, () => {
-      db.prepare(
-        `DELETE FROM raffle_numbers
-         WHERE raffle_id = ? AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`
-      ).run(raffleId, nowIso);
+    const raffleId = Number(req.params.id);
+    const number = req.params.number;
+    if (!isValidTwoDigitNumber(number)) {
+      res.status(400).json({ error: 'Número inválido.' });
+      return;
+    }
+
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
+
+    const fullName = normalizeText(req.body?.fullName, 100);
+    const phone = normalizePhone(req.body?.phone);
+    const address = normalizeText(req.body?.address, 200);
+    const markPaid = Boolean(req.body?.markPaid);
+    const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
+
+    if (fullName.length < 3) {
+      res.status(400).json({ error: 'Ingresa el nombre completo del nuevo comprador.' });
+      return;
+    }
+    if (!phone) {
+      res.status(400).json({
+        error: 'Ingresa un celular colombiano válido de 10 dígitos (ej: 3001234567).',
+      });
+      return;
+    }
+
+    const db = getDb();
+    const releaseHours = Number(raffle.release_hours);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAtIso = markPaid
+      ? null
+      : new Date(now.getTime() + releaseHours * 60 * 60 * 1000).toISOString();
+
+    await db.withTransaction(async (tx) => {
+      if (tx.dialect === 'postgres') {
+        await tx.queryOne('SELECT id FROM raffles WHERE id = ? FOR UPDATE', [raffleId]);
+      }
+      const existingNum = await tx.queryOne<{ id: number }>(
+        'SELECT id FROM raffle_numbers WHERE raffle_id = ? AND number = ?',
+        [raffleId, number]
+      );
+
+      const buyerId = await tx.insertReturningId(
+        `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [raffleId, fullName, phone, address, nowIso]
+      );
+
+      if (existingNum) {
+        await tx.execute(
+          `UPDATE raffle_numbers
+           SET buyer_id = ?, status = ?, payment_method = ?, reserved_at = ?, expires_at = ?, paid_at = ?
+           WHERE raffle_id = ? AND number = ?`,
+          [
+            buyerId,
+            markPaid ? 'paid' : 'pending',
+            paymentMethod,
+            nowIso,
+            expiresAtIso,
+            markPaid ? nowIso : null,
+            raffleId,
+            number,
+          ]
+        );
+
+        await tx.execute(
+          `DELETE FROM buyers
+           WHERE raffle_id = ?
+             AND NOT EXISTS (SELECT 1 FROM raffle_numbers rn WHERE rn.buyer_id = buyers.id)`,
+          [raffleId]
+        );
+      } else {
+        await tx.execute(
+          `INSERT INTO raffle_numbers (raffle_id, number, buyer_id, status, payment_method, reserved_at, expires_at, paid_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            raffleId,
+            number,
+            buyerId,
+            markPaid ? 'paid' : 'pending',
+            paymentMethod,
+            nowIso,
+            expiresAtIso,
+            markPaid ? nowIso : null,
+          ]
+        );
+      }
+    });
+
+    res.json({
+      ok: true,
+      assigned: {
+        number,
+        fullName,
+        phone,
+        status: markPaid ? 'paid' : 'pending',
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRafflesRouter.post('/:id/numbers/assign', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
+
+    const rawNumbers: unknown[] = Array.isArray(req.body?.numbers) ? req.body.numbers : [];
+    const numbers: string[] = Array.from(
+      new Set(rawNumbers.filter(isValidTwoDigitNumber))
+    ).sort();
+    const fullName = normalizeText(req.body?.fullName, 100);
+    const phone = normalizePhone(req.body?.phone);
+    const address = normalizeText(req.body?.address, 200);
+    const markPaid = req.body?.markPaid !== false;
+    const paymentMethod =
+      normalizeText(req.body?.paymentMethod, 50) || (markPaid ? 'Efectivo' : '');
+
+    if (numbers.length === 0) {
+      res.status(400).json({ error: 'Selecciona al menos un número válido entre 00 y 99.' });
+      return;
+    }
+    if (fullName.length < 3) {
+      res.status(400).json({ error: 'Ingresa el nombre completo del comprador.' });
+      return;
+    }
+    if (!phone) {
+      res.status(400).json({
+        error: 'Ingresa un celular colombiano válido de 10 dígitos (ej: 3001234567).',
+      });
+      return;
+    }
+
+    const db = getDb();
+    const releaseHours = Number(raffle.release_hours);
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const expiresAtIso = markPaid
+      ? null
+      : new Date(now.getTime() + releaseHours * 60 * 60 * 1000).toISOString();
+
+    await db.withTransaction(async (tx) => {
+      if (tx.dialect === 'postgres') {
+        await tx.queryOne('SELECT id FROM raffles WHERE id = ? FOR UPDATE', [raffleId]);
+      }
+
+      await releaseExpiredNumbersWithinTx(tx, raffleId);
 
       const placeholders = numbers.map(() => '?').join(',');
-      const taken = db
-        .prepare(
-          `SELECT number FROM raffle_numbers WHERE raffle_id = ? AND number IN (${placeholders}) ORDER BY number`
-        )
-        .all(raffleId, ...numbers) as Array<{ number: string }>;
+      const taken = await tx.query<{ number: string }>(
+        `SELECT number FROM raffle_numbers WHERE raffle_id = ? AND number IN (${placeholders}) ORDER BY number`,
+        [raffleId, ...numbers]
+      );
 
       if (taken.length > 0) {
         throw new Error(`TAKEN:${taken.map((t) => t.number).join(', ')}`);
       }
 
-      const buyerInsert = db
-        .prepare(
-          `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
-           VALUES (?, ?, ?, ?, ?)`
-        )
-        .run(raffleId, fullName, phone, address, nowIso);
-      const buyerId = Number(buyerInsert.lastInsertRowid);
-
-      const insertStmt = db.prepare(
-        `INSERT INTO raffle_numbers (raffle_id, number, buyer_id, status, payment_method, reserved_at, expires_at, paid_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      const buyerId = await tx.insertReturningId(
+        `INSERT INTO buyers (raffle_id, full_name, phone, address, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [raffleId, fullName, phone, address, nowIso]
       );
+
       for (const num of numbers) {
-        insertStmt.run(
-          raffleId,
-          num,
-          buyerId,
-          markPaid ? 'paid' : 'pending',
-          paymentMethod,
-          nowIso,
-          expiresAtIso,
-          markPaid ? nowIso : null
+        await tx.execute(
+          `INSERT INTO raffle_numbers (raffle_id, number, buyer_id, status, payment_method, reserved_at, expires_at, paid_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            raffleId,
+            num,
+            buyerId,
+            markPaid ? 'paid' : 'pending',
+            paymentMethod,
+            nowIso,
+            expiresAtIso,
+            markPaid ? nowIso : null,
+          ]
         );
       }
     });
@@ -742,218 +813,241 @@ adminRafflesRouter.post('/:id/numbers/assign', (req, res) => {
       });
       return;
     }
-    throw err;
+    next(err);
   }
 });
 
-adminRafflesRouter.post('/:id/buyers/:buyerId/confirm-all', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const buyerId = Number(req.params.buyerId);
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
+adminRafflesRouter.post('/:id/buyers/:buyerId/confirm-all', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const buyerId = Number(req.params.buyerId);
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
+
+    const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
+    const db = getDb();
+    await releaseExpiredNumbers(db, raffleId);
+
+    const buyer = await db.queryOne<{ id: number; full_name: string; phone: string }>(
+      'SELECT id, full_name, phone FROM buyers WHERE id = ? AND raffle_id = ?',
+      [buyerId, raffleId]
+    );
+
+    if (!buyer) {
+      res.status(404).json({ error: 'Comprador no encontrado en esta rifa.' });
+      return;
+    }
+
+    const paidAt = new Date().toISOString();
+    await db.execute(
+      `UPDATE raffle_numbers
+       SET status = 'paid',
+           expires_at = NULL,
+           paid_at = ?,
+           payment_method = COALESCE(NULLIF(?, ''), payment_method)
+       WHERE raffle_id = ? AND buyer_id = ? AND status = 'pending'`,
+      [paidAt, paymentMethod, raffleId, buyerId]
+    );
+
+    const allBuyerNumbers = await db.query<{ number: string }>(
+      'SELECT number FROM raffle_numbers WHERE raffle_id = ? AND buyer_id = ? ORDER BY number ASC',
+      [raffleId, buyerId]
+    );
+
+    res.json({
+      ok: true,
+      confirmedBuyer: {
+        buyerId: Number(buyer.id),
+        fullName: buyer.full_name,
+        phone: buyer.phone,
+        numbers: allBuyerNumbers.map((r) => r.number),
+      },
+    });
+  } catch (err) {
+    next(err);
   }
-
-  const paymentMethod = normalizeText(req.body?.paymentMethod, 50);
-  const db = getDb();
-  releaseExpiredNumbers(db, raffleId);
-
-  const buyer = db
-    .prepare('SELECT id, full_name, phone FROM buyers WHERE id = ? AND raffle_id = ?')
-    .get(buyerId, raffleId) as { id: number; full_name: string; phone: string } | undefined;
-
-  if (!buyer) {
-    res.status(404).json({ error: 'Comprador no encontrado en esta rifa.' });
-    return;
-  }
-
-  const paidAt = new Date().toISOString();
-  db.prepare(
-    `UPDATE raffle_numbers
-     SET status = 'paid', expires_at = NULL, paid_at = ?, payment_method = CASE WHEN ? != '' THEN ? ELSE payment_method END
-     WHERE raffle_id = ? AND buyer_id = ? AND status = 'pending'`
-  ).run(paidAt, paymentMethod, paymentMethod, raffleId, buyerId);
-
-  const allBuyerNumbers = db
-    .prepare('SELECT number FROM raffle_numbers WHERE raffle_id = ? AND buyer_id = ? ORDER BY number ASC')
-    .all(raffleId, buyerId) as Array<{ number: string }>;
-
-  res.json({
-    ok: true,
-    confirmedBuyer: {
-      buyerId: buyer.id,
-      fullName: buyer.full_name,
-      phone: buyer.phone,
-      numbers: allBuyerNumbers.map((r) => r.number),
-    },
-  });
 });
 
-adminRafflesRouter.post('/:id/winner', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+adminRafflesRouter.post('/:id/winner', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const winningNumber = req.body?.winningNumber;
-  if (!isValidTwoDigitNumber(winningNumber)) {
-    res.status(400).json({ error: 'Ingresa un número ganador válido de dos cifras (00 a 99).' });
-    return;
-  }
+    const winningNumber = req.body?.winningNumber;
+    if (!isValidTwoDigitNumber(winningNumber)) {
+      res
+        .status(400)
+        .json({ error: 'Ingresa un número ganador válido de dos cifras (00 a 99).' });
+      return;
+    }
 
-  const db = getDb();
-  releaseExpiredNumbers(db, raffleId);
+    const db = getDb();
+    await releaseExpiredNumbers(db, raffleId);
 
-  const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE raffles
-     SET winning_number = ?, status = 'closed', updated_at = ?
-     WHERE id = ? AND admin_id = ?`
-  ).run(winningNumber, now, raffleId, req.admin!.id);
+    const now = new Date().toISOString();
+    await db.execute(
+      `UPDATE raffles
+       SET winning_number = ?, status = 'closed', updated_at = ?
+       WHERE id = ? AND admin_id = ?`,
+      [winningNumber, now, raffleId, req.admin!.id]
+    );
 
-  const winner = db
-    .prepare(
+    const winner = await db.queryOne<{
+      status: 'pending' | 'paid';
+      full_name: string;
+      phone: string;
+    }>(
       `SELECT rn.status, b.full_name, b.phone
        FROM raffle_numbers rn
        JOIN buyers b ON b.id = rn.buyer_id
-       WHERE rn.raffle_id = ? AND rn.number = ?`
-    )
-    .get(raffleId, winningNumber) as
-    | { status: 'pending' | 'paid'; full_name: string; phone: string }
-    | undefined;
+       WHERE rn.raffle_id = ? AND rn.number = ?`,
+      [raffleId, winningNumber]
+    );
 
-  res.json({
-    ok: true,
-    winningNumber,
-    winner: winner
-      ? {
-          status: winner.status,
-          fullName: winner.full_name,
-          phone: winner.phone,
-        }
-      : null,
-  });
+    res.json({
+      ok: true,
+      winningNumber,
+      winner: winner
+        ? {
+            status: winner.status,
+            fullName: winner.full_name,
+            phone: winner.phone,
+          }
+        : null,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-adminRafflesRouter.get('/:id/export-csv', (req, res) => {
-  const raffleId = Number(req.params.id);
-  const raffle = getOwnedRaffle(raffleId, req.admin!.id);
-  if (!raffle) {
-    res.status(404).json({ error: 'Rifa no encontrada.' });
-    return;
-  }
+adminRafflesRouter.get('/:id/export-csv', async (req, res, next) => {
+  try {
+    const raffleId = Number(req.params.id);
+    const raffle = await getOwnedRaffle(raffleId, req.admin!.id);
+    if (!raffle) {
+      res.status(404).json({ error: 'Rifa no encontrada.' });
+      return;
+    }
 
-  const db = getDb();
-  releaseExpiredNumbers(db, raffleId);
+    const db = getDb();
+    await releaseExpiredNumbers(db, raffleId);
 
-  const rows = db
-    .prepare(
+    const rows = await db.query<{
+      number: string;
+      status: 'pending' | 'paid';
+      payment_method: string;
+      reserved_at: string;
+      paid_at: string | null;
+      buyer_id: number;
+      full_name: string;
+      phone: string;
+      address: string;
+      created_at: string;
+    }>(
       `SELECT rn.number, rn.status, rn.payment_method, rn.reserved_at, rn.paid_at,
               b.id AS buyer_id, b.full_name, b.phone, b.address, b.created_at
        FROM raffle_numbers rn
        JOIN buyers b ON b.id = rn.buyer_id
        WHERE rn.raffle_id = ?
-       ORDER BY b.created_at DESC, rn.number ASC`
-    )
-    .all(raffleId) as Array<{
-    number: string;
-    status: 'pending' | 'paid';
-    payment_method: string;
-    reserved_at: string;
-    paid_at: string | null;
-    buyer_id: number;
-    full_name: string;
-    phone: string;
-    address: string;
-    created_at: string;
-  }>;
-
-  const grouped = new Map<
-    number,
-    {
-      fullName: string;
-      phone: string;
-      address: string;
-      numbers: string[];
-      pendingCount: number;
-      paidCount: number;
-      methods: Set<string>;
-      reservedAt: string;
-      paidAt: string;
-    }
-  >();
-
-  for (const row of rows) {
-    let item = grouped.get(row.buyer_id);
-    if (!item) {
-      item = {
-        fullName: row.full_name,
-        phone: row.phone,
-        address: row.address,
-        numbers: [],
-        pendingCount: 0,
-        paidCount: 0,
-        methods: new Set<string>(),
-        reservedAt: row.reserved_at,
-        paidAt: row.paid_at ?? '',
-      };
-      grouped.set(row.buyer_id, item);
-    }
-    item.numbers.push(row.number);
-    if (row.status === 'paid') item.paidCount += 1;
-    else item.pendingCount += 1;
-    if (row.payment_method) item.methods.add(row.payment_method);
-    if (row.paid_at && (!item.paidAt || row.paid_at > item.paidAt)) {
-      item.paidAt = row.paid_at;
-    }
-  }
-
-  const header = [
-    'Nombre completo',
-    'Celular / WhatsApp',
-    'Dirección',
-    'Números',
-    'Cantidad',
-    'Total COP',
-    'Estado',
-    'Método de pago',
-    'Fecha de apartado',
-    'Fecha de pago',
-  ]
-    .map(csvEscape)
-    .join(',');
-
-  const lines = [header];
-  for (const entry of grouped.values()) {
-    const statusLabel =
-      entry.pendingCount === 0 ? 'Pagado' : entry.paidCount === 0 ? 'Pendiente' : 'Parcial';
-    const totalCop = entry.numbers.length * raffle.ticket_price_cop;
-    lines.push(
-      [
-        entry.fullName,
-        entry.phone,
-        entry.address,
-        entry.numbers.join(' '),
-        entry.numbers.length,
-        totalCop,
-        statusLabel,
-        Array.from(entry.methods).join(' / '),
-        entry.reservedAt,
-        entry.paidAt,
-      ]
-        .map(csvEscape)
-        .join(',')
+       ORDER BY b.created_at DESC, rn.number ASC`,
+      [raffleId]
     );
+
+    const grouped = new Map<
+      number,
+      {
+        fullName: string;
+        phone: string;
+        address: string;
+        numbers: string[];
+        pendingCount: number;
+        paidCount: number;
+        methods: Set<string>;
+        reservedAt: string;
+        paidAt: string;
+      }
+    >();
+
+    for (const row of rows) {
+      const buyerId = Number(row.buyer_id);
+      let item = grouped.get(buyerId);
+      if (!item) {
+        item = {
+          fullName: row.full_name,
+          phone: row.phone,
+          address: row.address,
+          numbers: [],
+          pendingCount: 0,
+          paidCount: 0,
+          methods: new Set<string>(),
+          reservedAt: row.reserved_at,
+          paidAt: row.paid_at ?? '',
+        };
+        grouped.set(buyerId, item);
+      }
+      item.numbers.push(row.number);
+      if (row.status === 'paid') item.paidCount += 1;
+      else item.pendingCount += 1;
+      if (row.payment_method) item.methods.add(row.payment_method);
+      if (row.paid_at && (!item.paidAt || row.paid_at > item.paidAt)) {
+        item.paidAt = row.paid_at;
+      }
+    }
+
+    const header = [
+      'Nombre completo',
+      'Celular / WhatsApp',
+      'Dirección',
+      'Números',
+      'Cantidad',
+      'Total COP',
+      'Estado',
+      'Método de pago',
+      'Fecha de apartado',
+      'Fecha de pago',
+    ]
+      .map(csvEscape)
+      .join(',');
+
+    const ticketPriceCop = Number(raffle.ticket_price_cop);
+    const lines = [header];
+    for (const entry of grouped.values()) {
+      const statusLabel =
+        entry.pendingCount === 0 ? 'Pagado' : entry.paidCount === 0 ? 'Pendiente' : 'Parcial';
+      const totalCop = entry.numbers.length * ticketPriceCop;
+      lines.push(
+        [
+          entry.fullName,
+          entry.phone,
+          entry.address,
+          entry.numbers.join(' '),
+          entry.numbers.length,
+          totalCop,
+          statusLabel,
+          Array.from(entry.methods).join(' / '),
+          entry.reservedAt,
+          entry.paidAt,
+        ]
+          .map(csvEscape)
+          .join(',')
+      );
+    }
+
+    const bom = '\uFEFF';
+    const csvContent = bom + lines.join('\r\n');
+    const safeFilename = `${raffle.slug}-participantes.csv`;
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
+    res.send(csvContent);
+  } catch (err) {
+    next(err);
   }
-
-  const bom = '\uFEFF';
-  const csvContent = bom + lines.join('\r\n');
-  const safeFilename = `${raffle.slug}-participantes.csv`;
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
-  res.send(csvContent);
 });

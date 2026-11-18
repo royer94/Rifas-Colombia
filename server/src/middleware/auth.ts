@@ -26,84 +26,106 @@ export function hashSessionToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
 }
 
-export function createSession(adminId: number): { rawToken: string; expiresAt: Date } {
+export async function createSession(
+  adminId: number
+): Promise<{ rawToken: string; expiresAt: Date }> {
   const db = getDb();
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = hashSessionToken(rawToken);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
 
-  // Limpiar sesiones vencidas ocasionalmente
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now.toISOString());
+  await db.execute('DELETE FROM sessions WHERE expires_at <= ?', [now.toISOString()]);
 
-  db.prepare('INSERT INTO sessions (id, admin_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(
-    tokenHash,
-    adminId,
-    expiresAt.toISOString(),
-    now.toISOString()
+  await db.execute(
+    'INSERT INTO sessions (id, admin_id, expires_at, created_at) VALUES (?, ?, ?, ?)',
+    [tokenHash, adminId, expiresAt.toISOString(), now.toISOString()]
   );
 
   return { rawToken, expiresAt };
 }
 
-export function deleteSession(rawToken: string): void {
+export async function deleteSession(rawToken: string): Promise<void> {
   if (!rawToken) return;
   const db = getDb();
-  db.prepare('DELETE FROM sessions WHERE id = ?').run(hashSessionToken(rawToken));
+  await db.execute('DELETE FROM sessions WHERE id = ?', [hashSessionToken(rawToken)]);
 }
 
-export function setSessionCookie(res: Response, rawToken: string, expiresAt: Date): void {
+function isSecureCookie(req?: Request): boolean {
+  return (
+    process.env.COOKIE_SECURE === 'true' ||
+    process.env.VERCEL === '1' ||
+    Boolean(req?.secure)
+  );
+}
+
+export function setSessionCookie(
+  res: Response,
+  rawToken: string,
+  expiresAt: Date,
+  req?: Request
+): void {
   res.cookie(SESSION_COOKIE_NAME, rawToken, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.COOKIE_SECURE === 'true',
+    secure: isSecureCookie(req),
     expires: expiresAt,
     path: '/',
   });
 }
 
-export function clearSessionCookie(res: Response): void {
+export function clearSessionCookie(res: Response, req?: Request): void {
   res.clearCookie(SESSION_COOKIE_NAME, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.COOKIE_SECURE === 'true',
+    secure: isSecureCookie(req),
     path: '/',
   });
 }
 
-export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const rawToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (typeof rawToken !== 'string' || rawToken.length < 20) {
-    res.status(401).json({ error: 'Debes iniciar sesión como administrador.' });
-    return;
-  }
+export async function requireAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const rawToken = req.cookies?.[SESSION_COOKIE_NAME];
+    if (typeof rawToken !== 'string' || rawToken.length < 20) {
+      res.status(401).json({ error: 'Debes iniciar sesión como administrador.' });
+      return;
+    }
 
-  const db = getDb();
-  const nowIso = new Date().toISOString();
-  const row = db
-    .prepare(
+    const db = getDb();
+    const nowIso = new Date().toISOString();
+    const row = await db.queryOne<{
+      id: number;
+      username: string;
+      display_name: string;
+      must_change_password: number;
+    }>(
       `SELECT a.id, a.username, a.display_name, a.must_change_password
        FROM sessions s
        JOIN admins a ON a.id = s.admin_id
-       WHERE s.id = ? AND s.expires_at > ?`
-    )
-    .get(hashSessionToken(rawToken), nowIso) as
-    | { id: number; username: string; display_name: string; must_change_password: number }
-    | undefined;
+       WHERE s.id = ? AND s.expires_at > ?`,
+      [hashSessionToken(rawToken), nowIso]
+    );
 
-  if (!row) {
-    clearSessionCookie(res);
-    res.status(401).json({ error: 'Tu sesión expiró. Vuelve a iniciar sesión.' });
-    return;
+    if (!row) {
+      clearSessionCookie(res, req);
+      res.status(401).json({ error: 'Tu sesión expiró. Vuelve a iniciar sesión.' });
+      return;
+    }
+
+    req.admin = {
+      id: Number(row.id),
+      username: row.username,
+      displayName: row.display_name,
+      mustChangePassword: Number(row.must_change_password) === 1,
+    };
+    next();
+  } catch (err) {
+    next(err);
   }
-
-  req.admin = {
-    id: row.id,
-    username: row.username,
-    displayName: row.display_name,
-    mustChangePassword: row.must_change_password === 1,
-  };
-  next();
 }
 
 export function getClientIp(req: Request): string {
@@ -114,11 +136,14 @@ export function getClientIp(req: Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
-export function checkLoginRateLimit(key: string): { blocked: boolean; retryMinutes: number } {
+export async function checkLoginRateLimit(
+  key: string
+): Promise<{ blocked: boolean; retryMinutes: number }> {
   const db = getDb();
-  const row = db
-    .prepare('SELECT attempts, locked_until FROM login_attempts WHERE attempt_key = ?')
-    .get(key) as { attempts: number; locked_until: string | null } | undefined;
+  const row = await db.queryOne<{ attempts: number; locked_until: string | null }>(
+    'SELECT attempts, locked_until FROM login_attempts WHERE attempt_key = ?',
+    [key]
+  );
 
   if (!row || !row.locked_until) {
     return { blocked: false, retryMinutes: 0 };
@@ -136,31 +161,38 @@ export function checkLoginRateLimit(key: string): { blocked: boolean; retryMinut
   return { blocked: false, retryMinutes: 0 };
 }
 
-export function recordFailedLogin(key: string): { blocked: boolean; remainingAttempts: number } {
+export async function recordFailedLogin(
+  key: string
+): Promise<{ blocked: boolean; remainingAttempts: number }> {
   const db = getDb();
   const now = new Date();
   const nowIso = now.toISOString();
-  const existing = db
-    .prepare('SELECT attempts, locked_until FROM login_attempts WHERE attempt_key = ?')
-    .get(key) as { attempts: number; locked_until: string | null } | undefined;
+  const existing = await db.queryOne<{ attempts: number; locked_until: string | null }>(
+    'SELECT attempts, locked_until FROM login_attempts WHERE attempt_key = ?',
+    [key]
+  );
 
   let nextAttempts = 1;
   if (existing) {
-    const expiredLock = existing.locked_until && Date.parse(existing.locked_until) <= now.getTime();
-    nextAttempts = expiredLock ? 1 : existing.attempts + 1;
+    const expiredLock =
+      existing.locked_until && Date.parse(existing.locked_until) <= now.getTime();
+    nextAttempts = expiredLock ? 1 : Number(existing.attempts) + 1;
   }
 
   const shouldLock = nextAttempts >= MAX_LOGIN_ATTEMPTS;
-  const lockedUntil = shouldLock ? new Date(now.getTime() + LOCK_DURATION_MS).toISOString() : null;
+  const lockedUntil = shouldLock
+    ? new Date(now.getTime() + LOCK_DURATION_MS).toISOString()
+    : null;
 
-  db.prepare(
+  await db.execute(
     `INSERT INTO login_attempts (attempt_key, attempts, locked_until, updated_at)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(attempt_key) DO UPDATE SET
        attempts = excluded.attempts,
        locked_until = excluded.locked_until,
-       updated_at = excluded.updated_at`
-  ).run(key, nextAttempts, lockedUntil, nowIso);
+       updated_at = excluded.updated_at`,
+    [key, nextAttempts, lockedUntil, nowIso]
+  );
 
   return {
     blocked: shouldLock,
@@ -168,7 +200,7 @@ export function recordFailedLogin(key: string): { blocked: boolean; remainingAtt
   };
 }
 
-export function clearFailedLogins(key: string): void {
+export async function clearFailedLogins(key: string): Promise<void> {
   const db = getDb();
-  db.prepare('DELETE FROM login_attempts WHERE attempt_key = ?').run(key);
+  await db.execute('DELETE FROM login_attempts WHERE attempt_key = ?', [key]);
 }

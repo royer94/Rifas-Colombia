@@ -11,6 +11,7 @@
     "dev:server": "tsx watch server/src/index.ts",
     "dev:client": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
+    "build:vercel": "vite build",
     "start": "node dist-server/index.js",
     "test": "tsx --test server/tests/raffle.test.ts"
   },
@@ -20,6 +21,7 @@
     "express": "^4.21.2",
     "helmet": "^8.1.0",
     "lucide-react": "^0.475.0",
+    "pg": "^8.23.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.2.0"
@@ -30,6 +32,7 @@
     "@types/cookie-parser": "^1.4.8",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.4",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",

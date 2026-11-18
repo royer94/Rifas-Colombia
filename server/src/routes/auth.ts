@@ -17,158 +17,178 @@ import { normalizeText } from '../utils/validation.js';
 
 export const authRouter = Router();
 
-authRouter.post('/login', (req, res) => {
-  const username = normalizeText(req.body?.username, 50).toLowerCase();
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+authRouter.post('/login', async (req, res, next) => {
+  try {
+    const username = normalizeText(req.body?.username, 50).toLowerCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
-  if (!username || !password) {
-    res.status(400).json({ error: 'Ingresa tu usuario y contraseña.' });
-    return;
-  }
+    if (!username || !password) {
+      res.status(400).json({ error: 'Ingresa tu usuario y contraseña.' });
+      return;
+    }
 
-  const ip = getClientIp(req);
-  const key = `${ip}:${username}`;
-  const rate = checkLoginRateLimit(key);
-  if (rate.blocked) {
-    res.status(429).json({
-      error: `Demasiados intentos fallidos. Intenta de nuevo en ${rate.retryMinutes} minuto(s).`,
-    });
-    return;
-  }
-
-  const db = getDb();
-  const admin = db
-    .prepare(
-      'SELECT id, username, password_hash, display_name, must_change_password FROM admins WHERE lower(username) = ?'
-    )
-    .get(username) as
-    | {
-        id: number;
-        username: string;
-        password_hash: string;
-        display_name: string;
-        must_change_password: number;
-      }
-    | undefined;
-
-  const valid = admin ? bcrypt.compareSync(password, admin.password_hash) : false;
-  if (!admin || !valid) {
-    const result = recordFailedLogin(key);
-    if (result.blocked) {
+    const ip = getClientIp(req);
+    const key = `${ip}:${username}`;
+    const rate = await checkLoginRateLimit(key);
+    if (rate.blocked) {
       res.status(429).json({
-        error: 'Demasiados intentos fallidos. Tu acceso quedó bloqueado temporalmente por 15 minutos.',
+        error: `Demasiados intentos fallidos. Intenta de nuevo en ${rate.retryMinutes} minuto(s).`,
       });
       return;
     }
-    res.status(401).json({
-      error: `Usuario o contraseña incorrectos. Te quedan ${result.remainingAttempts} intento(s).`,
+
+    const db = getDb();
+    const admin = await db.queryOne<{
+      id: number;
+      username: string;
+      password_hash: string;
+      display_name: string;
+      must_change_password: number;
+    }>(
+      'SELECT id, username, password_hash, display_name, must_change_password FROM admins WHERE lower(username) = ?',
+      [username]
+    );
+
+    const valid = admin ? bcrypt.compareSync(password, admin.password_hash) : false;
+    if (!admin || !valid) {
+      const result = await recordFailedLogin(key);
+      if (result.blocked) {
+        res.status(429).json({
+          error:
+            'Demasiados intentos fallidos. Tu acceso quedó bloqueado temporalmente por 15 minutos.',
+        });
+        return;
+      }
+      res.status(401).json({
+        error: `Usuario o contraseña incorrectos. Te quedan ${result.remainingAttempts} intento(s).`,
+      });
+      return;
+    }
+
+    await clearFailedLogins(key);
+    const adminId = Number(admin.id);
+    const { rawToken, expiresAt } = await createSession(adminId);
+    setSessionCookie(res, rawToken, expiresAt, req);
+
+    res.json({
+      admin: {
+        id: adminId,
+        username: admin.username,
+        displayName: admin.display_name,
+        mustChangePassword: Number(admin.must_change_password) === 1,
+      },
     });
-    return;
+  } catch (err) {
+    next(err);
   }
-
-  clearFailedLogins(key);
-  const { rawToken, expiresAt } = createSession(admin.id);
-  setSessionCookie(res, rawToken, expiresAt);
-
-  res.json({
-    admin: {
-      id: admin.id,
-      username: admin.username,
-      displayName: admin.display_name,
-      mustChangePassword: admin.must_change_password === 1,
-    },
-  });
 });
 
-authRouter.post('/register', (req, res) => {
-  const username = normalizeText(req.body?.username, 32).toLowerCase();
-  const displayName = normalizeText(req.body?.displayName, 80);
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+authRouter.post('/register', async (req, res, next) => {
+  try {
+    const username = normalizeText(req.body?.username, 32).toLowerCase();
+    const displayName = normalizeText(req.body?.displayName, 80);
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
 
-  if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
-    res.status(400).json({
-      error: 'El usuario debe tener entre 3 y 32 caracteres (solo letras minúsculas, números, ., _ o -).',
-    });
-    return;
-  }
-  if (displayName.length < 2) {
-    res.status(400).json({ error: 'Ingresa tu nombre para mostrar (mínimo 2 caracteres).' });
-    return;
-  }
-  if (password.length < 8) {
-    res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
-    return;
-  }
+    if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
+      res.status(400).json({
+        error:
+          'El usuario debe tener entre 3 y 32 caracteres (solo letras minúsculas, números, ., _ o -).',
+      });
+      return;
+    }
+    if (displayName.length < 2) {
+      res.status(400).json({ error: 'Ingresa tu nombre para mostrar (mínimo 2 caracteres).' });
+      return;
+    }
+    if (password.length < 8) {
+      res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
+      return;
+    }
 
-  const db = getDb();
-  const existing = db.prepare('SELECT id FROM admins WHERE lower(username) = ?').get(username);
-  if (existing) {
-    res.status(409).json({ error: 'Ese nombre de usuario ya está en uso.' });
-    return;
-  }
+    const db = getDb();
+    const existing = await db.queryOne<{ id: number }>(
+      'SELECT id FROM admins WHERE lower(username) = ?',
+      [username]
+    );
+    if (existing) {
+      res.status(409).json({ error: 'Ese nombre de usuario ya está en uso.' });
+      return;
+    }
 
-  const passwordHash = bcrypt.hashSync(password, 12);
-  const now = new Date().toISOString();
-  const info = db
-    .prepare(
+    const passwordHash = bcrypt.hashSync(password, 12);
+    const now = new Date().toISOString();
+    const adminId = await db.insertReturningId(
       `INSERT INTO admins (username, password_hash, display_name, must_change_password, created_at)
-       VALUES (?, ?, ?, 0, ?)`
-    )
-    .run(username, passwordHash, displayName, now);
+       VALUES (?, ?, ?, 0, ?)`,
+      [username, passwordHash, displayName, now]
+    );
 
-  const adminId = Number(info.lastInsertRowid);
-  const { rawToken, expiresAt } = createSession(adminId);
-  setSessionCookie(res, rawToken, expiresAt);
+    const { rawToken, expiresAt } = await createSession(adminId);
+    setSessionCookie(res, rawToken, expiresAt, req);
 
-  res.status(201).json({
-    admin: {
-      id: adminId,
-      username,
-      displayName,
-      mustChangePassword: false,
-    },
-  });
+    res.status(201).json({
+      admin: {
+        id: adminId,
+        username,
+        displayName,
+        mustChangePassword: false,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
-authRouter.post('/logout', (req, res) => {
-  const rawToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (typeof rawToken === 'string') {
-    deleteSession(rawToken);
+authRouter.post('/logout', async (req, res, next) => {
+  try {
+    const rawToken = req.cookies?.[SESSION_COOKIE_NAME];
+    if (typeof rawToken === 'string') {
+      await deleteSession(rawToken);
+    }
+    clearSessionCookie(res, req);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
   }
-  clearSessionCookie(res);
-  res.json({ ok: true });
 });
 
 authRouter.get('/me', requireAdmin, (req, res) => {
   res.json({ admin: req.admin });
 });
 
-authRouter.post('/change-password', requireAdmin, (req, res) => {
-  const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
-  const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+authRouter.post('/change-password', requireAdmin, async (req, res, next) => {
+  try {
+    const currentPassword =
+      typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
 
-  if (!currentPassword || newPassword.length < 8) {
-    res.status(400).json({
-      error: 'Debes ingresar tu contraseña actual y una nueva contraseña de al menos 8 caracteres.',
-    });
-    return;
+    if (!currentPassword || newPassword.length < 8) {
+      res.status(400).json({
+        error:
+          'Debes ingresar tu contraseña actual y una nueva contraseña de al menos 8 caracteres.',
+      });
+      return;
+    }
+
+    const db = getDb();
+    const row = await db.queryOne<{ password_hash: string }>(
+      'SELECT password_hash FROM admins WHERE id = ?',
+      [req.admin!.id]
+    );
+
+    if (!row || !bcrypt.compareSync(currentPassword, row.password_hash)) {
+      res.status(401).json({ error: 'La contraseña actual no es correcta.' });
+      return;
+    }
+
+    const newHash = bcrypt.hashSync(newPassword, 12);
+    await db.execute('UPDATE admins SET password_hash = ?, must_change_password = 0 WHERE id = ?', [
+      newHash,
+      req.admin!.id,
+    ]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
   }
-
-  const db = getDb();
-  const row = db
-    .prepare('SELECT password_hash FROM admins WHERE id = ?')
-    .get(req.admin!.id) as { password_hash: string } | undefined;
-
-  if (!row || !bcrypt.compareSync(currentPassword, row.password_hash)) {
-    res.status(401).json({ error: 'La contraseña actual no es correcta.' });
-    return;
-  }
-
-  const newHash = bcrypt.hashSync(newPassword, 12);
-  db.prepare('UPDATE admins SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(
-    newHash,
-    req.admin!.id
-  );
-
-  res.json({ ok: true });
 });
