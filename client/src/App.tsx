@@ -6,6 +6,7 @@ import { AdminLoginPage, AdminProfile } from './pages/AdminLoginPage';
 import { AdminRaffleManagePage } from './pages/AdminRaffleManagePage';
 import { HomePage } from './pages/HomePage';
 import { PublicRafflePage } from './pages/PublicRafflePage';
+import { TermsPage } from './pages/TermsPage';
 import { apiFetch } from './utils/api';
 
 function AdminRoutes() {
@@ -68,6 +69,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/r/:slug" element={<PublicRafflePage />} />
+        <Route path="/politicas" element={<TermsPage />} />
         <Route path="/admin/*" element={<AdminRoutes />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

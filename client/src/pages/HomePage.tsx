@@ -186,6 +186,17 @@ export function HomePage() {
           )}
         </section>
       </main>
+
+      <footer className="max-w-5xl mx-auto px-4 py-8 mt-6 border-t border-slate-200 text-center text-xs text-slate-500 space-y-1.5">
+        <p>
+          Rifas Colombia actúa únicamente como herramienta tecnológica intermediaria entre organizadores y participantes.
+        </p>
+        <p>
+          <Link to="/politicas" className="font-bold text-indigo-600 hover:text-indigo-800 underline">
+            Políticas de uso y condiciones del servicio
+          </Link>
+        </p>
+      </footer>
     </div>
   );
 }

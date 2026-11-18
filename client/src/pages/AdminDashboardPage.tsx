@@ -406,6 +406,12 @@ export function AdminDashboardPage({
         )}
       </main>
 
+      <footer className="max-w-6xl mx-auto px-4 pt-8 text-center text-xs text-slate-500">
+        <Link to="/politicas" className="font-semibold text-indigo-600 hover:text-indigo-800 underline">
+          Políticas de uso y condiciones del servicio
+        </Link>
+      </footer>
+
       {showRaffleModal && (
         <RaffleFormModal
           initial={editingRaffle}

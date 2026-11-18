@@ -531,6 +531,17 @@ export function PublicRafflePage() {
             onNumberClick={handleToggleNumber}
           />
         </section>
+
+        <footer className="text-center text-xs text-slate-500 pt-2 pb-4 px-2 space-y-1">
+          <p>
+            Esta plataforma actúa solo como intermediario tecnológico. Los pagos y la entrega del premio son responsabilidad directa del organizador.
+          </p>
+          <p>
+            <Link to="/politicas" className="font-bold text-indigo-600 hover:text-indigo-800 underline">
+              Ver políticas de uso y condiciones del servicio
+            </Link>
+          </p>
+        </footer>
       </main>
 
       {/* Barra inferior fija cuando el visitante tiene números seleccionados */}
@@ -646,7 +657,20 @@ export function PublicRafflePage() {
                 />
               </div>
 
-              <div className="pt-2 flex flex-col sm:flex-row gap-2.5">
+              <p className="text-[11px] sm:text-xs text-slate-500 leading-relaxed">
+                Al confirmar aceptas nuestras{' '}
+                <Link
+                  to="/politicas"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-bold text-indigo-600 underline"
+                >
+                  Políticas de uso
+                </Link>
+                : somos solo intermediarios tecnológicos; el pago y la entrega del premio dependen exclusivamente del organizador.
+              </p>
+
+              <div className="pt-1 flex flex-col sm:flex-row gap-2.5">
                 <button
                   type="submit"
                   disabled={submitting}

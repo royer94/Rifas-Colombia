@@ -139,6 +139,14 @@ export function AdminLoginPage({ onAuthenticated }: AdminLoginPageProps) {
             />
           </div>
 
+          <p className="text-xs text-slate-500 text-center leading-relaxed">
+            Al ingresar o crear una cuenta aceptas las{' '}
+            <Link to="/politicas" className="font-bold text-indigo-600 underline">
+              Políticas de uso
+            </Link>{' '}
+            y asumes la responsabilidad total por el recaudo y la entrega de los premios de tus rifas.
+          </p>
+
           <button
             type="submit"
             disabled={submitting}
