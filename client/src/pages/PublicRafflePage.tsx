@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { GridNumberItem, NumberGrid, NumberLegend } from '../components/NumberGrid';
+import { SiteFooter } from '../components/SiteFooter';
 import { ApiError, apiFetch } from '../utils/api';
 import {
   buildWhatsAppShareUrl,
@@ -532,16 +533,7 @@ export function PublicRafflePage() {
           />
         </section>
 
-        <footer className="text-center text-xs text-slate-500 pt-2 pb-4 px-2 space-y-1">
-          <p>
-            Esta plataforma actúa solo como intermediario tecnológico. Los pagos y la entrega del premio son responsabilidad directa del organizador.
-          </p>
-          <p>
-            <Link to="/politicas" className="font-bold text-indigo-600 hover:text-indigo-800 underline">
-              Ver políticas de uso y condiciones del servicio
-            </Link>
-          </p>
-        </footer>
+        <SiteFooter className="pt-2 pb-4 px-2" />
       </main>
 
       {/* Barra inferior fija cuando el visitante tiene números seleccionados */}

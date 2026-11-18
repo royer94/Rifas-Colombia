@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { AdminRaffleFormInitial, RaffleFormModal } from '../components/RaffleFormModal';
+import { SiteFooter } from '../components/SiteFooter';
 import { AdminProfile } from './AdminLoginPage';
 import { ApiError, apiFetch } from '../utils/api';
 import { formatCop, formatDateCo } from '../utils/format';
@@ -406,11 +407,7 @@ export function AdminDashboardPage({
         )}
       </main>
 
-      <footer className="max-w-6xl mx-auto px-4 pt-8 text-center text-xs text-slate-500">
-        <Link to="/politicas" className="font-semibold text-indigo-600 hover:text-indigo-800 underline">
-          Políticas de uso y condiciones del servicio
-        </Link>
-      </footer>
+      <SiteFooter className="max-w-6xl mx-auto px-4 pt-8" />
 
       {showRaffleModal && (
         <RaffleFormModal
