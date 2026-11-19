@@ -66,7 +66,13 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
   const [paymentInstructions, setPaymentInstructions] = useState(
     initial?.paymentInstructions ?? ''
   );
-  const [releaseHours, setReleaseHours] = useState(String(initial?.releaseHours ?? 24));
+  const [releaseDays, setReleaseDays] = useState(
+    String(
+      initial?.releaseHours
+        ? Math.min(15, Math.max(1, Math.round(initial.releaseHours / 24)))
+        : 1
+    )
+  );
   const [status, setStatus] = useState<'draft' | 'active' | 'closed'>(
     initial?.status ?? 'active'
   );
@@ -82,7 +88,8 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
       lotteryChoice === OTHER_LOTTERY_VALUE ? customLottery.trim() : lotteryChoice;
     const finalPrice =
       priceChoice === OTHER_PRICE_VALUE ? Number(customPrice) : Number(priceChoice);
-    const hours = Number(releaseHours);
+    const days = Number(releaseDays);
+    const hours = days * 24;
 
     if (name.trim().length < 3) {
       setError('El nombre de la rifa debe tener al menos 3 caracteres.');
@@ -100,8 +107,8 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
       setError('El valor del puesto debe ser un número entero desde $1.000 COP.');
       return;
     }
-    if (!Number.isInteger(hours) || hours < 1 || hours > 720) {
-      setError('Las horas para liberar números sin pago deben estar entre 1 y 720.');
+    if (!Number.isInteger(days) || days < 1 || days > 15) {
+      setError('Los días para liberar números sin pago deben estar entre 1 y 15.');
       return;
     }
     if (paymentInstructions.trim().length < 5) {
@@ -387,17 +394,19 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
 
             <div>
               <label className="block text-sm font-bold text-slate-800 mb-1">
-                Horas para liberar sin pago
+                Días para liberar sin pago
               </label>
-              <input
-                type="number"
-                min={1}
-                max={720}
-                required
-                value={releaseHours}
-                onChange={(e) => setReleaseHours(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
+              <select
+                value={releaseDays}
+                onChange={(e) => setReleaseDays(e.target.value)}
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {Array.from({ length: 15 }, (_, idx) => idx + 1).map((day) => (
+                  <option key={day} value={String(day)}>
+                    {day} {day === 1 ? 'día (24 horas)' : 'días'}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>

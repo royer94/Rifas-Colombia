@@ -449,7 +449,13 @@ export function PublicRafflePage() {
                 <p className="mt-1 text-sm font-bold text-slate-900">
                   {formatDateTimeCo(confirmation.expiresAt)}
                 </p>
-                <p className="text-xs text-slate-500">({confirmation.releaseHours}h para pagar)</p>
+                <p className="text-xs text-slate-500">
+                  {confirmation.releaseHours % 24 === 0
+                    ? `(${confirmation.releaseHours / 24} ${
+                        confirmation.releaseHours / 24 === 1 ? 'día' : 'días'
+                      } para pagar)`
+                    : `(${confirmation.releaseHours}h para pagar)`}
+                </p>
               </div>
             </div>
 
