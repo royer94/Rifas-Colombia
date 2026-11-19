@@ -43,13 +43,51 @@ export function formatDateCo(ymd: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
   const [y, m, d] = ymd.split('-').map(Number);
   const date = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-  return date.toLocaleDateString('es-CO', {
+  const raw = date.toLocaleDateString('es-CO', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
     year: 'numeric',
     timeZone: 'UTC',
   });
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+export function getDrawCountdown(
+  ymd: string,
+  status: 'draft' | 'active' | 'closed' = 'active'
+): { daysRemaining: number; label: string; tone: 'today' | 'soon' | 'normal' | 'past' } | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+  const todayBogota = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Bogota',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+
+  const [ty, tm, td] = todayBogota.split('-').map(Number);
+  const [dy, dm, dd] = ymd.split('-').map(Number);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
+  const drawUtc = Date.UTC(dy, dm - 1, dd);
+  const daysRemaining = Math.round((drawUtc - todayUtc) / 86_400_000);
+
+  if (status === 'closed') {
+    return { daysRemaining, label: 'Sorteo finalizado', tone: 'past' };
+  }
+  if (daysRemaining === 0) {
+    return { daysRemaining: 0, label: '¡Hoy es el sorteo!', tone: 'today' };
+  }
+  if (daysRemaining === 1) {
+    return { daysRemaining: 1, label: '¡Falta 1 día para el sorteo!', tone: 'soon' };
+  }
+  if (daysRemaining > 1) {
+    return {
+      daysRemaining,
+      label: `Faltan ${daysRemaining} días para el sorteo`,
+      tone: daysRemaining <= 3 ? 'soon' : 'normal',
+    };
+  }
+  return { daysRemaining, label: 'Fecha de sorteo cumplida', tone: 'past' };
 }
 
 export function formatDateTimeCo(iso: string): string {
@@ -111,6 +149,20 @@ export function buildPaymentReminderWhatsAppMessage(params: {
     `💰 *Total a pagar:* ${formatCop(params.totalCop)}\n` +
     `💳 *Instrucciones de pago:*\n${params.paymentInstructions}\n\n` +
     `Cuando realices el pago, envíanos el comprobante por aquí para confirmarlo. ¡Gracias!`
+  );
+}
+
+export function buildPaymentProofWhatsAppMessage(params: {
+  buyerName: string;
+  raffleName: string;
+  numbers: string[];
+  totalCop: number;
+}): string {
+  return (
+    `¡Hola! 👋 Soy *${params.buyerName}*. Acabo de apartar en la rifa *${params.raffleName}*:\n\n` +
+    `🎟️ *Número(s):* ${params.numbers.join(', ')}\n` +
+    `💰 *Total:* ${formatCop(params.totalCop)}\n\n` +
+    `Te envío mi comprobante de pago por aquí para que por favor los confirmes. ¡Gracias!`
   );
 }
 

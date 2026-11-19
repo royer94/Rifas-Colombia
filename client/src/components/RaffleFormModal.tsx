@@ -16,6 +16,8 @@ export interface AdminRaffleFormInitial {
   drawDate: string;
   prizeText: string;
   prizeImage?: string;
+  organizerName?: string;
+  organizerPhone?: string;
   lotteryName: string;
   ticketPriceCop: number;
   paymentInstructions: string;
@@ -25,6 +27,7 @@ export interface AdminRaffleFormInitial {
 
 interface RaffleFormModalProps {
   initial?: AdminRaffleFormInitial | null;
+  defaultOrganizerName?: string;
   onClose: () => void;
   onSaved: (raffleId: number) => void;
 }
@@ -32,7 +35,12 @@ interface RaffleFormModalProps {
 const OTHER_LOTTERY_VALUE = '__otra__';
 const OTHER_PRICE_VALUE = '__otro_precio__';
 
-export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalProps) {
+export function RaffleFormModal({
+  initial,
+  defaultOrganizerName = '',
+  onClose,
+  onSaved,
+}: RaffleFormModalProps) {
   const isEditing = Boolean(initial?.id);
   const initialIsKnownLottery =
     !initial || COLOMBIAN_LOTTERIES.includes(initial.lotteryName as (typeof COLOMBIAN_LOTTERIES)[number]);
@@ -43,11 +51,21 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
   const [slug, setSlug] = useState(initial?.slug ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [drawDate, setDrawDate] = useState(
-    initial?.drawDate ?? new Date(Date.now() + 7 * 86400_000).toISOString().slice(0, 10)
+    initial?.drawDate ??
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Bogota',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(new Date(Date.now() + 7 * 86400_000))
   );
   const [prizeText, setPrizeText] = useState(initial?.prizeText ?? '');
   const [prizeImage, setPrizeImage] = useState(initial?.prizeImage ?? '');
   const [imageBusy, setImageBusy] = useState(false);
+  const [organizerName, setOrganizerName] = useState(
+    initial?.organizerName || defaultOrganizerName || ''
+  );
+  const [organizerPhone, setOrganizerPhone] = useState(initial?.organizerPhone ?? '');
 
   const [lotteryChoice, setLotteryChoice] = useState(
     initialIsKnownLottery ? initial?.lotteryName ?? COLOMBIAN_LOTTERIES[0] : OTHER_LOTTERY_VALUE
@@ -125,6 +143,8 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
         drawDate,
         prizeText: prizeText.trim(),
         prizeImage,
+        organizerName: organizerName.trim(),
+        organizerPhone: organizerPhone.trim(),
         lotteryName: finalLottery,
         ticketPriceCop: finalPrice,
         paymentInstructions: paymentInstructions.trim(),
@@ -376,6 +396,33 @@ export function RaffleFormModal({ initial, onClose, onSaved }: RaffleFormModalPr
                   className="mt-2 w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-bold text-slate-800 mb-1">
+                Organizador visible <span className="text-slate-400 font-normal">(da confianza)</span>
+              </label>
+              <input
+                type="text"
+                value={organizerName}
+                onChange={(e) => setOrganizerName(e.target.value)}
+                placeholder="Ej: Juan Pérez o Fundación Esperanza"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-bold text-slate-800 mb-1">
+                WhatsApp del organizador <span className="text-slate-400 font-normal">(para recibir comprobantes)</span>
+              </label>
+              <input
+                type="tel"
+                inputMode="numeric"
+                value={organizerPhone}
+                onChange={(e) => setOrganizerPhone(e.target.value)}
+                placeholder="Ej: 3001234567"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
             </div>
 
             <div className="sm:col-span-2">

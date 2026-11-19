@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, Gift, ShieldCheck, Ticket, Trophy } from 'lucide-react';
+import { Calendar, Clock, Gift, ShieldCheck, Ticket, Trophy, UserCheck } from 'lucide-react';
 import { SiteFooter } from '../components/SiteFooter';
 import { apiFetch } from '../utils/api';
-import { formatCop, formatDateCo } from '../utils/format';
+import { formatCop, formatDateCo, getDrawCountdown } from '../utils/format';
 
 interface PublicRaffleSummary {
   id: number;
@@ -13,6 +13,8 @@ interface PublicRaffleSummary {
   drawDate: string;
   prizeText: string;
   prizeImage?: string;
+  organizerName?: string;
+  organizerPhone?: string;
   lotteryName: string;
   ticketPriceCop: number;
   status: 'active' | 'closed';
@@ -164,6 +166,24 @@ export function HomePage() {
                           {formatDateCo(raffle.drawDate)} · {raffle.lotteryName}
                         </span>
                       </p>
+                      {(() => {
+                        const countdown = getDrawCountdown(raffle.drawDate, raffle.status);
+                        if (!countdown || raffle.status === 'closed') return null;
+                        return (
+                          <p className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-full">
+                            <Clock className="w-3.5 h-3.5 shrink-0" />
+                            <span>{countdown.label}</span>
+                          </p>
+                        );
+                      })()}
+                      {raffle.organizerName && (
+                        <p className="flex items-center gap-2 text-xs text-slate-500">
+                          <UserCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>
+                            Organiza: <strong className="text-slate-700">{raffle.organizerName}</strong>
+                          </span>
+                        </p>
+                      )}
                       {raffle.status === 'closed' && raffle.winningNumber && (
                         <p className="flex items-center gap-2 text-amber-800 font-bold">
                           <Trophy className="w-4 h-4 text-amber-600 shrink-0" />

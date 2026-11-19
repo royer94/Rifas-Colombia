@@ -412,6 +412,7 @@ export function AdminDashboardPage({
       {showRaffleModal && (
         <RaffleFormModal
           initial={editingRaffle}
+          defaultOrganizerName={admin.displayName}
           onClose={() => setShowRaffleModal(false)}
           onSaved={() => {
             setShowRaffleModal(false);

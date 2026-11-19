@@ -1,0 +1,2 @@
+ALTER TABLE raffles ADD COLUMN organizer_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE raffles ADD COLUMN organizer_phone TEXT NOT NULL DEFAULT '';

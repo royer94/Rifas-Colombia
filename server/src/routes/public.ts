@@ -7,12 +7,16 @@ export const publicRouter = Router();
 
 interface PublicRaffleRow {
   id: number;
+  admin_id: number;
   slug: string;
   name: string;
   description: string;
   draw_date: string;
   prize_text: string;
   prize_image: string;
+  organizer_name: string;
+  organizer_phone: string;
+  admin_display_name: string;
   lottery_name: string;
   ticket_price_cop: number;
   payment_instructions: string;
@@ -53,6 +57,9 @@ publicRouter.get('/raffles', async (_req, res, next) => {
       draw_date: string;
       prize_text: string;
       prize_image: string;
+      organizer_name: string;
+      organizer_phone: string;
+      admin_display_name: string;
       lottery_name: string;
       ticket_price_cop: number;
       status: 'active' | 'closed';
@@ -61,10 +68,12 @@ publicRouter.get('/raffles', async (_req, res, next) => {
       paid_count: number | string;
     }>(
       `SELECT r.id, r.slug, r.name, r.description, r.draw_date, r.prize_text, r.prize_image,
+              r.organizer_name, r.organizer_phone, MAX(a.display_name) AS admin_display_name,
               r.lottery_name, r.ticket_price_cop, r.status, r.winning_number,
               SUM(CASE WHEN rn.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
               SUM(CASE WHEN rn.status = 'paid' THEN 1 ELSE 0 END) AS paid_count
        FROM raffles r
+       JOIN admins a ON a.id = r.admin_id
        LEFT JOIN raffle_numbers rn ON rn.raffle_id = r.id
        WHERE r.status IN ('active', 'closed')
        GROUP BY r.id
@@ -83,6 +92,8 @@ publicRouter.get('/raffles', async (_req, res, next) => {
           drawDate: r.draw_date,
           prizeText: r.prize_text,
           prizeImage: r.prize_image ?? '',
+          organizerName: (r.organizer_name || r.admin_display_name || '').trim(),
+          organizerPhone: r.organizer_phone ?? '',
           lotteryName: r.lottery_name,
           ticketPriceCop: Number(r.ticket_price_cop),
           status: r.status,
@@ -110,10 +121,12 @@ publicRouter.get('/raffles/:slug', async (req, res, next) => {
 
     const db = getDb();
     const raffle = await db.queryOne<PublicRaffleRow>(
-      `SELECT id, slug, name, description, draw_date, prize_text, prize_image, lottery_name,
-              ticket_price_cop, payment_instructions, release_hours, status, winning_number
-       FROM raffles
-       WHERE slug = ? AND status != 'draft'`,
+      `SELECT r.id, r.admin_id, r.slug, r.name, r.description, r.draw_date, r.prize_text, r.prize_image,
+              r.organizer_name, r.organizer_phone, a.display_name AS admin_display_name,
+              r.lottery_name, r.ticket_price_cop, r.payment_instructions, r.release_hours, r.status, r.winning_number
+       FROM raffles r
+       JOIN admins a ON a.id = r.admin_id
+       WHERE r.slug = ? AND r.status != 'draft'`,
       [slug]
     );
 
@@ -180,6 +193,8 @@ publicRouter.get('/raffles/:slug', async (req, res, next) => {
         drawDate: raffle.draw_date,
         prizeText: raffle.prize_text,
         prizeImage: raffle.prize_image ?? '',
+        organizerName: (raffle.organizer_name || raffle.admin_display_name || '').trim(),
+        organizerPhone: raffle.organizer_phone ?? '',
         lotteryName: raffle.lottery_name,
         ticketPriceCop: Number(raffle.ticket_price_cop),
         paymentInstructions: raffle.payment_instructions,
@@ -243,18 +258,21 @@ publicRouter.post('/raffles/:slug/reserve', async (req, res) => {
       const lockSuffix = tx.dialect === 'postgres' ? ' FOR UPDATE' : '';
       const raffle = await tx.queryOne<{
         id: number;
+        admin_id: number;
         slug: string;
         name: string;
         draw_date: string;
         prize_text: string;
+        organizer_name: string;
+        organizer_phone: string;
         lottery_name: string;
         ticket_price_cop: number;
         payment_instructions: string;
         release_hours: number;
         status: 'draft' | 'active' | 'closed';
       }>(
-        `SELECT id, slug, name, draw_date, prize_text, lottery_name,
-                ticket_price_cop, payment_instructions, release_hours, status
+        `SELECT id, admin_id, slug, name, draw_date, prize_text, organizer_name, organizer_phone,
+                lottery_name, ticket_price_cop, payment_instructions, release_hours, status
          FROM raffles
          WHERE slug = ?${lockSuffix}`,
         [slug]
@@ -308,12 +326,23 @@ publicRouter.post('/raffles/:slug/reserve', async (req, res) => {
         );
       }
 
+      let resolvedOrganizerName = (raffle.organizer_name || '').trim();
+      if (!resolvedOrganizerName) {
+        const adminRow = await tx.queryOne<{ display_name: string }>(
+          'SELECT display_name FROM admins WHERE id = ?',
+          [raffle.admin_id]
+        );
+        resolvedOrganizerName = adminRow?.display_name?.trim() || '';
+      }
+
       return {
         reservation: {
           raffleName: raffle.name,
           raffleSlug: raffle.slug,
           drawDate: raffle.draw_date,
           prizeText: raffle.prize_text,
+          organizerName: resolvedOrganizerName,
+          organizerPhone: raffle.organizer_phone ?? '',
           lotteryName: raffle.lottery_name,
           numbers: uniqueNumbers,
           ticketPriceCop,

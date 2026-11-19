@@ -25,6 +25,8 @@ interface RaffleDbRow {
   draw_date: string;
   prize_text: string;
   prize_image: string;
+  organizer_name: string;
+  organizer_phone: string;
   lottery_name: string;
   ticket_price_cop: number;
   payment_instructions: string;
@@ -44,6 +46,8 @@ function toAdminRaffleDto(r: RaffleDbRow) {
     drawDate: r.draw_date,
     prizeText: r.prize_text,
     prizeImage: r.prize_image ?? '',
+    organizerName: r.organizer_name ?? '',
+    organizerPhone: r.organizer_phone ?? '',
     lotteryName: r.lottery_name,
     ticketPriceCop: Number(r.ticket_price_cop),
     paymentInstructions: r.payment_instructions,
@@ -77,6 +81,16 @@ function parseRafflePayload(body: Record<string, unknown>) {
   const status = typeof body?.status === 'string' ? body.status : 'active';
   const rawSlug = typeof body?.slug === 'string' ? slugify(body.slug) : '';
   const imageCheck = validatePrizeImage(body?.prizeImage);
+  const organizerName = normalizeText(body?.organizerName, 100);
+  const rawOrganizerPhone = normalizeText(body?.organizerPhone, 20);
+  const organizerPhone = rawOrganizerPhone ? normalizePhone(rawOrganizerPhone) : '';
+
+  if (rawOrganizerPhone && !organizerPhone) {
+    return {
+      error:
+        'El WhatsApp del organizador debe ser un celular colombiano válido de 10 dígitos (ej: 3001234567) o déjalo vacío.',
+    };
+  }
 
   if (name.length < 3) {
     return { error: 'El nombre de la rifa debe tener al menos 3 caracteres.' };
@@ -113,6 +127,8 @@ function parseRafflePayload(body: Record<string, unknown>) {
       drawDate,
       prizeText,
       prizeImage: imageCheck.value,
+      organizerName,
+      organizerPhone: organizerPhone || '',
       lotteryName,
       ticketPriceCop,
       paymentInstructions,
@@ -210,9 +226,10 @@ adminRafflesRouter.post('/', async (req, res, next) => {
     const now = new Date().toISOString();
     const insertedId = await db.insertReturningId(
       `INSERT INTO raffles (
-         admin_id, slug, name, description, draw_date, prize_text, prize_image, lottery_name,
+         admin_id, slug, name, description, draw_date, prize_text, prize_image,
+         organizer_name, organizer_phone, lottery_name,
          ticket_price_cop, payment_instructions, release_hours, status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.admin!.id,
         slug,
@@ -221,6 +238,8 @@ adminRafflesRouter.post('/', async (req, res, next) => {
         data.drawDate,
         data.prizeText,
         data.prizeImage,
+        data.organizerName,
+        data.organizerPhone,
         data.lotteryName,
         data.ticketPriceCop,
         data.paymentInstructions,
@@ -276,7 +295,8 @@ adminRafflesRouter.put('/:id', async (req, res, next) => {
     await db.execute(
       `UPDATE raffles
        SET slug = ?, name = ?, description = ?, draw_date = ?, prize_text = ?,
-           prize_image = ?, lottery_name = ?, ticket_price_cop = ?, payment_instructions = ?,
+           prize_image = ?, organizer_name = ?, organizer_phone = ?, lottery_name = ?,
+           ticket_price_cop = ?, payment_instructions = ?,
            release_hours = ?, status = ?, updated_at = ?
        WHERE id = ? AND admin_id = ?`,
       [
@@ -286,6 +306,8 @@ adminRafflesRouter.put('/:id', async (req, res, next) => {
         data.drawDate,
         data.prizeText,
         data.prizeImage,
+        data.organizerName,
+        data.organizerPhone,
         data.lotteryName,
         data.ticketPriceCop,
         data.paymentInstructions,

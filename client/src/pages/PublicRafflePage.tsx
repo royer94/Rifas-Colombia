@@ -8,20 +8,25 @@ import {
   Clock,
   Copy,
   Gift,
+  MessageCircle,
   RefreshCw,
   Share2,
   Ticket,
   Trophy,
+  UserCheck,
   X,
 } from 'lucide-react';
 import { GridNumberItem, NumberGrid, NumberLegend } from '../components/NumberGrid';
 import { SiteFooter } from '../components/SiteFooter';
 import { ApiError, apiFetch } from '../utils/api';
 import {
+  buildPaymentProofWhatsAppMessage,
+  buildWhatsAppDirectUrl,
   buildWhatsAppShareUrl,
   formatCop,
   formatDateCo,
   formatDateTimeCo,
+  getDrawCountdown,
   normalizeColombianPhone,
 } from '../utils/format';
 
@@ -34,6 +39,8 @@ interface PublicRaffleResponse {
     drawDate: string;
     prizeText: string;
     prizeImage?: string;
+    organizerName?: string;
+    organizerPhone?: string;
     lotteryName: string;
     ticketPriceCop: number;
     paymentInstructions: string;
@@ -57,6 +64,8 @@ interface ReservationConfirmation {
   raffleSlug: string;
   drawDate: string;
   prizeText: string;
+  organizerName?: string;
+  organizerPhone?: string;
   lotteryName: string;
   numbers: string[];
   ticketPriceCop: number;
@@ -88,6 +97,8 @@ export function PublicRafflePage() {
 
   const selectedRef = useRef<string[]>([]);
   selectedRef.current = selected;
+  const showModalRef = useRef(false);
+  showModalRef.current = showModal;
 
   const fetchBoard = useCallback(
     async (silent = false) => {
@@ -125,10 +136,16 @@ export function PublicRafflePage() {
   useEffect(() => {
     fetchBoard(false);
     const interval = window.setInterval(() => {
-      fetchBoard(true);
+      if (!showModalRef.current) {
+        fetchBoard(true);
+      }
     }, 4000);
 
-    const onFocus = () => fetchBoard(true);
+    const onFocus = () => {
+      if (!showModalRef.current) {
+        fetchBoard(true);
+      }
+    };
     window.addEventListener('focus', onFocus);
 
     return () => {
@@ -264,6 +281,22 @@ export function PublicRafflePage() {
 
   const { raffle, numbers, counts } = data;
   const isClosed = raffle.status === 'closed';
+  const countdown = getDrawCountdown(raffle.drawDate, raffle.status);
+
+  const proofWhatsAppMessage = confirmation
+    ? buildPaymentProofWhatsAppMessage({
+        buyerName: confirmation.buyerName,
+        raffleName: confirmation.raffleName,
+        numbers: confirmation.numbers,
+        totalCop: confirmation.totalCop,
+      })
+    : '';
+  const proofOrganizerPhone = confirmation?.organizerPhone || raffle.organizerPhone || '';
+  const proofWhatsAppUrl = confirmation
+    ? proofOrganizerPhone
+      ? buildWhatsAppDirectUrl(proofOrganizerPhone, proofWhatsAppMessage)
+      : buildWhatsAppShareUrl(proofWhatsAppMessage)
+    : '#';
 
   return (
     <div className="min-h-screen bg-slate-50 pb-28">
@@ -291,13 +324,29 @@ export function PublicRafflePage() {
         {/* Encabezado de la rifa */}
         <section className="rounded-3xl bg-white border border-slate-200 p-5 sm:p-6 shadow-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span
-              className={`inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-full ${
-                isClosed ? 'bg-slate-200 text-slate-800' : 'bg-emerald-100 text-emerald-800'
-              }`}
-            >
-              {isClosed ? 'Rifa cerrada' : 'Rifa abierta · En vivo'}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-full ${
+                  isClosed ? 'bg-slate-200 text-slate-800' : 'bg-emerald-100 text-emerald-800'
+                }`}
+              >
+                {isClosed ? 'Rifa cerrada' : 'Rifa abierta · En vivo'}
+              </span>
+              {countdown && !isClosed && (
+                <span
+                  className={`inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-full border ${
+                    countdown.tone === 'today'
+                      ? 'bg-rose-100 text-rose-900 border-rose-300'
+                      : countdown.tone === 'soon'
+                      ? 'bg-amber-100 text-amber-900 border-amber-300'
+                      : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5 shrink-0" />
+                  <span>{countdown.label}</span>
+                </span>
+              )}
+            </div>
             <span className="text-sm font-extrabold text-indigo-700 bg-indigo-50 border border-indigo-200 px-3 py-1 rounded-full">
               {formatCop(raffle.ticketPriceCop)} por número
             </span>
@@ -339,9 +388,14 @@ export function PublicRafflePage() {
                 <Calendar className="w-4 h-4" />
                 <span>Fecha del sorteo</span>
               </div>
-              <p className="mt-1 font-bold text-slate-900 text-sm sm:text-base capitalize">
+              <p className="mt-1 font-bold text-slate-900 text-sm sm:text-base">
                 {formatDateCo(raffle.drawDate)}
               </p>
+              {countdown && !isClosed && (
+                <p className="mt-0.5 text-xs font-semibold text-indigo-700">
+                  {countdown.label}
+                </p>
+              )}
             </div>
 
             <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5">
@@ -359,6 +413,35 @@ export function PublicRafflePage() {
             Gana quien tenga el número igual a las <strong>dos últimas cifras</strong> del premio mayor de{' '}
             <strong>{raffle.lotteryName}</strong> en la fecha del sorteo.
           </p>
+
+          {(raffle.organizerName || raffle.organizerPhone) && (
+            <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-4 py-3 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 text-xs sm:text-sm text-slate-800">
+                <UserCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+                <span>
+                  Organiza:{' '}
+                  <strong className="text-slate-950">
+                    {raffle.organizerName || 'Organizador verificado'}
+                  </strong>
+                  {raffle.organizerPhone ? ` · Cel: ${raffle.organizerPhone}` : ''}
+                </span>
+              </div>
+              {raffle.organizerPhone && (
+                <a
+                  href={buildWhatsAppDirectUrl(
+                    raffle.organizerPhone,
+                    `¡Hola${raffle.organizerName ? ` ${raffle.organizerName}` : ''}! Tengo una consulta sobre la rifa "${raffle.name}".`
+                  )}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 text-xs shadow-xs transition"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>Contactar por WhatsApp</span>
+                </a>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Ganador si la rifa está cerrada */}
@@ -485,6 +568,18 @@ export function PublicRafflePage() {
               <p className="text-sm sm:text-base whitespace-pre-line font-medium leading-relaxed">
                 {confirmation.paymentInstructions}
               </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5">
+              <a
+                href={proofWhatsAppUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-5 py-3.5 text-sm sm:text-base shadow-md transition"
+              >
+                <MessageCircle className="w-5 h-5" />
+                <span>Enviar comprobante de pago por WhatsApp</span>
+              </a>
             </div>
 
             <p className="text-xs sm:text-sm text-slate-700 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5">

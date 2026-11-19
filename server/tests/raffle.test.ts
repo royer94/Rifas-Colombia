@@ -158,6 +158,8 @@ describe('Flujo completo de Rifas Colombia', () => {
         drawDate: '2026-12-20',
         prizeText: 'Moto NMAX 2026 o $10.000.000',
         prizeImage: samplePng,
+        organizerName: 'Roman Ramirez',
+        organizerPhone: '3014445566',
         lotteryName: 'Lotería de Medellín',
         ticketPriceCop: 20000,
         paymentInstructions: 'Nequi 3001112233 a nombre de Juan',
@@ -167,6 +169,8 @@ describe('Flujo completo de Rifas Colombia', () => {
     });
     assert.equal(createRes.status, 201);
     assert.equal(createRes.json.raffle.prizeImage, samplePng);
+    assert.equal(createRes.json.raffle.organizerName, 'Roman Ramirez');
+    assert.equal(createRes.json.raffle.organizerPhone, '3014445566');
     raffleId = createRes.json.raffle.id;
 
     const reg2 = await request('/api/admin/auth/register', {
@@ -223,6 +227,8 @@ describe('Flujo completo de Rifas Colombia', () => {
     const publicBoard = await request(`/api/public/raffles/${raffleSlug}`);
     assert.equal(publicBoard.status, 200);
     assert.equal(publicBoard.json.counts.pending, 2);
+    assert.equal(publicBoard.json.raffle.organizerName, 'Roman Ramirez');
+    assert.equal(publicBoard.json.raffle.organizerPhone, '3014445566');
 
     const expectedUnreserved = winnerRes === res1 ? '29' : '28';
     const numObj = publicBoard.json.numbers.find((n: any) => n.number === expectedUnreserved);
