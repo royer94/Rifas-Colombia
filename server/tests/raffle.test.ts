@@ -128,6 +128,22 @@ describe('Flujo completo de Rifas Colombia', () => {
   });
 
   it('permite crear una rifa con imagen opcional y aísla los datos entre administradores', async () => {
+    const missingOrganizerReject = await request('/api/admin/raffles', {
+      method: 'POST',
+      cookie: adminCookie,
+      body: JSON.stringify({
+        name: 'Rifa Sin Organizador',
+        drawDate: '2026-12-20',
+        prizeText: 'Premio',
+        lotteryName: 'Lotería de Medellín',
+        ticketPriceCop: 20000,
+        paymentInstructions: 'Nequi 3001112233 a nombre de Juan',
+        releaseHours: 24,
+        status: 'active',
+      }),
+    });
+    assert.equal(missingOrganizerReject.status, 400);
+
     const svgReject = await request('/api/admin/raffles', {
       method: 'POST',
       cookie: adminCookie,
@@ -136,6 +152,8 @@ describe('Flujo completo de Rifas Colombia', () => {
         drawDate: '2026-12-20',
         prizeText: 'Premio',
         prizeImage: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+        organizerName: 'Roman Ramirez',
+        organizerPhone: '3014445566',
         lotteryName: 'Lotería de Medellín',
         ticketPriceCop: 20000,
         paymentInstructions: 'Nequi 3001112233 a nombre de Juan',

@@ -6,6 +6,7 @@ import {
   TICKET_PRICE_OPTIONS,
   compressPrizeImageFile,
   formatCop,
+  normalizeColombianPhone,
 } from '../utils/format';
 
 export interface AdminRaffleFormInitial {
@@ -108,6 +109,7 @@ export function RaffleFormModal({
       priceChoice === OTHER_PRICE_VALUE ? Number(customPrice) : Number(priceChoice);
     const days = Number(releaseDays);
     const hours = days * 24;
+    const cleanOrganizerPhone = normalizeColombianPhone(organizerPhone);
 
     if (name.trim().length < 3) {
       setError('El nombre de la rifa debe tener al menos 3 caracteres.');
@@ -129,6 +131,14 @@ export function RaffleFormModal({
       setError('Los días para liberar números sin pago deben estar entre 1 y 15.');
       return;
     }
+    if (organizerName.trim().length < 3) {
+      setError('Ingresa el nombre del organizador visible (mínimo 3 caracteres).');
+      return;
+    }
+    if (!cleanOrganizerPhone) {
+      setError('Ingresa el WhatsApp del organizador (celular colombiano válido de 10 dígitos, ej: 3001234567).');
+      return;
+    }
     if (paymentInstructions.trim().length < 5) {
       setError('Escribe las instrucciones de pago (Nequi, Daviplata, cuenta, etc.).');
       return;
@@ -144,7 +154,7 @@ export function RaffleFormModal({
         prizeText: prizeText.trim(),
         prizeImage,
         organizerName: organizerName.trim(),
-        organizerPhone: organizerPhone.trim(),
+        organizerPhone: cleanOrganizerPhone,
         lotteryName: finalLottery,
         ticketPriceCop: finalPrice,
         paymentInstructions: paymentInstructions.trim(),
@@ -400,10 +410,11 @@ export function RaffleFormModal({
 
             <div>
               <label className="block text-sm font-bold text-slate-800 mb-1">
-                Organizador visible <span className="text-slate-400 font-normal">(da confianza)</span>
+                Organizador visible <span className="text-rose-600">*</span>
               </label>
               <input
                 type="text"
+                required
                 value={organizerName}
                 onChange={(e) => setOrganizerName(e.target.value)}
                 placeholder="Ej: Juan Pérez o Fundación Esperanza"
@@ -413,16 +424,20 @@ export function RaffleFormModal({
 
             <div>
               <label className="block text-sm font-bold text-slate-800 mb-1">
-                WhatsApp del organizador <span className="text-slate-400 font-normal">(para recibir comprobantes)</span>
+                WhatsApp del organizador <span className="text-rose-600">*</span>
               </label>
               <input
                 type="tel"
                 inputMode="numeric"
+                required
                 value={organizerPhone}
                 onChange={(e) => setOrganizerPhone(e.target.value)}
                 placeholder="Ej: 3001234567"
                 className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
+              <p className="mt-1 text-xs text-slate-500">
+                10 dígitos (para contacto y recibir comprobantes de pago).
+              </p>
             </div>
 
             <div className="sm:col-span-2">

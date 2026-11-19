@@ -83,12 +83,17 @@ function parseRafflePayload(body: Record<string, unknown>) {
   const imageCheck = validatePrizeImage(body?.prizeImage);
   const organizerName = normalizeText(body?.organizerName, 100);
   const rawOrganizerPhone = normalizeText(body?.organizerPhone, 20);
-  const organizerPhone = rawOrganizerPhone ? normalizePhone(rawOrganizerPhone) : '';
+  const organizerPhone = normalizePhone(rawOrganizerPhone);
 
-  if (rawOrganizerPhone && !organizerPhone) {
+  if (organizerName.length < 3) {
+    return {
+      error: 'Ingresa el nombre del organizador visible (mínimo 3 caracteres).',
+    };
+  }
+  if (!organizerPhone) {
     return {
       error:
-        'El WhatsApp del organizador debe ser un celular colombiano válido de 10 dígitos (ej: 3001234567) o déjalo vacío.',
+        'Ingresa el WhatsApp del organizador (celular colombiano válido de 10 dígitos, ej: 3001234567).',
     };
   }
 
